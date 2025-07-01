@@ -1,0 +1,1241 @@
+/* --- Import Fonts and Define Variables --- */
+@import url('https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&display=swap');
+:root {
+  --bg-dark: #131314;
+  --bg-light: #1e1f20;
+  --bg-sidebar: #1e1f20;
+  --text-primary: #e3e3e3;
+  --text-secondary: #9aa0a6;
+  --border-color: #3c4043;
+  --accent-blue: #89b4f8;
+  --hover-bg: #282a2c;
+  --font-family: 'Google Sans', 'Inter', system-ui, sans-serif;
+}
+
+/* --- Global & Layout Styles --- */
+* { box-sizing: border-box; }
+body { margin: 0; background-color: var(--bg-dark); color: var(--text-primary); font-family: var(--font-family); }
+.layout-container { display: flex; height: 100vh; }
+
+/* --- Sidebar Styles --- */
+.sidebar {
+    width: 260px;
+    background-color: var(--bg-sidebar);
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    flex-shrink: 0;
+    transition: transform 0.3s ease-in-out;
+    border-right: 1px solid var(--border-color);
+}
+.new-chat-button, .import-button {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    border: none;
+    background-color: var(--bg-light);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+.new-chat-button:hover, .import-button:hover { background-color: var(--hover-bg); }
+.import-button { margin-top: auto; }
+
+.sidebar-section { display: flex; flex-direction: column; overflow-y: auto; }
+.section-title { font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase; margin: 0 0 0.5rem 0.5rem; display: flex; align-items: center; gap: 0.5rem; }
+.item-list { list-style: none; padding: 0; margin: 0; }
+.list-item {
+    padding: 0.6rem 0.75rem;
+    border-radius: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 0.9rem;
+}
+.list-item:hover { background-color: var(--hover-bg); }
+
+
+/* --- Main Content Area --- */
+.main-content-area {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+}
+.main-header {
+    display: none;
+    padding: 1rem;
+    align-items: center;
+    gap: 1rem;
+    border-bottom: 1px solid var(--border-color);
+}
+.hamburger-menu {
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+.main-header h2 { margin: 0; font-size: 1.2rem; }
+
+.ai-main-content { flex-grow: 1; overflow-y: auto; padding: 1.5rem; max-width: 900px; width: 100%; margin: 0 auto; }
+.ai-footer { padding: 1rem 1.5rem; max-width: 900px; width: 100%; margin: 0 auto; }
+.welcome-screen { padding-top: 5vh; animation: fadeIn 0.8s ease-out; }
+.welcome-header h1 { font-size: 3.5rem; font-weight: 400; margin: 0; color: #c4c7c5; }
+.welcome-gradient { font-size: 3.5rem; font-weight: 400; background: -webkit-linear-gradient(45deg, #4285f4, #9b72cb, #d96570, #f2a60c); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.example-prompts { margin-top: 3rem; display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; }
+.prompt-card { background-color: var(--bg-light); border-radius: 12px; padding: 1rem; cursor: pointer; transition: background-color 0.2s ease; }
+.prompt-card:hover { background-color: #282a2c; }
+.prompt-card h4 { margin: 0 0 0.5rem 0; font-weight: 500; }
+.prompt-card p { margin: 0; color: var(--text-secondary); font-size: 0.9rem; }
+.search-bar { display: flex; align-items: center; background-color: var(--bg-light); border-radius: 28px; padding: 0.5rem 0.5rem 0.5rem 1.5rem; box-shadow: 0 1px 6px rgba(0,0,0,0.2); }
+.search-bar input { flex-grow: 1; border: none; outline: none; background: transparent; color: var(--text-primary); font-size: 1rem; font-family: var(--font-family); }
+.search-bar button { display: flex; align-items: center; justify-content: center; background: transparent; border: none; border-radius: 50%; width: 40px; height: 40px; cursor: pointer; color: var(--text-secondary); transition: background-color 0.2s ease, color 0.2s ease; }
+.search-bar button:hover:not(:disabled) { background-color: #2d3b51; color: var(--accent-blue); }
+.search-bar button:disabled { cursor: not-allowed; opacity: 0.5; }
+.footer-notice { font-size: 0.75rem; text-align: center; color: var(--text-secondary); margin-top: 1rem; }
+
+/* --- Results View & Skeletons --- */
+.results-view { animation: fadeIn 0.5s ease-out; }
+.user-prompt, .ai-response { display: flex; gap: 1.5rem; margin-bottom: 2rem; }
+.avatar { width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; flex-shrink: 0; }
+.user-avatar { background-color: #584f63; }
+.ai-avatar { background: linear-gradient(135deg, #4285f4, #9b72cb); }
+.ai-icon-star { width: 20px; height: 20px; background-color: white; clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%); }
+.user-prompt p, .response-content { padding-top: 0.5rem; margin: 0; line-height: 1.7; width: 100%; }
+
+
+/* 
+============================================================
+  ★★★ STYLES FOR STRUCTURED SEARCH RESULTS (NEW SECTION) ★★★
+============================================================
+*/
+.search-results-container {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem; /* Space between each result item */
+}
+
+.result-item {
+  /* This class is a container for each result */
+}
+
+.result-title {
+  text-decoration: none; /* Removes underline from the link by default */
+}
+
+.result-title h3 {
+  color: var(--accent-blue); /* Use the accent blue for clickable titles */
+  font-size: 1.2rem;
+  font-weight: 500;
+  margin: 0 0 0.25rem 0;
+  display: inline; /* Allows hover underline to fit text width */
+}
+
+.result-title:hover h3 {
+  text-decoration: underline; /* Add underline on hover */
+}
+
+.result-snippet {
+  color: var(--text-primary);
+  margin: 0.5rem 0;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.result-link {
+  color: var(--text-secondary); /* Lighter color for the URL text */
+  font-size: 0.85rem;
+  text-decoration: none;
+  word-break: break-all; /* Prevents long links from breaking the layout */
+}
+
+.result-link:hover {
+  text-decoration: underline;
+}
+
+/* This is the fallback style for error messages or plain text responses */
+.ai-result-text {
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 1rem;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.skeleton-wrapper { width: 100%; }
+.skeleton-line { height: 1.2em; background: linear-gradient(90deg, var(--bg-light) 25%, #2a2b2d 50%, var(--bg-light) 75%); background-size: 200% 100%; border-radius: 4px; margin-bottom: 1rem; animation: shimmer 1.5s infinite linear; }
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* --- RESPONSIVE DESIGN FOR SIDEBAR --- */
+@media (max-width: 768px) {
+    .main-header { display: flex; }
+    .sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 100%;
+        transform: translateX(-100%);
+        z-index: 1000;
+        border-right: 1px solid var(--border-color);
+    }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar-overlay {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0, 0, 0, 0.5);
+        z-index: 999;
+    }
+    .sidebar-overlay.open { display: block; }
+    .welcome-header h1, .welcome-gradient { font-size: 2.5rem; }
+    .example-prompts { grid-template-columns: 1fr; }
+    .ai-main-content { padding: 1rem; }
+    .ai-footer { padding: 1rem; }
+    .user-prompt, .ai-response { gap: 1rem; }
+    .avatar { width: 32px; height: 32px; }
+    .ai-icon-star { width: 16px; height: 16px; }
+}
+.list-item-container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border-radius: 6px;
+}
+.list-item-container:hover {
+  background-color: var(--hover-bg);
+}
+
+/* The text part of the history item */
+.list-item-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-grow: 1;
+  font-size: 0.9rem;
+}
+
+/* The three-dots menu container */
+.list-item-menu {
+  position: relative;
+  flex-shrink: 0;
+}
+
+/* The three-dots button itself */
+.menu-button {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0.25rem;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+}
+.menu-button:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* The dropdown menu that appears */
+.dropdown-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  background-color: #282a2c;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 10;
+  width: 120px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.dropdown-menu button {
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  padding: 0.75rem 1rem;
+  text-align: left;
+  width: 100%;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.dropdown-menu button:hover {
+  background-color: #3c4043;
+}
+
+.dropdown-menu .delete-button {
+  color: #f28b82; /* Red color for delete */
+}
+
+/* Styles for the rename input form */
+.rename-form {
+  flex-grow: 1;
+}
+
+.rename-form input {
+  width: 100%;
+  background-color: #3c4043;
+  border: 1px solid var(--accent-blue);
+  border-radius: 4px;
+  color: var(--text-primary);
+  padding: 0.2rem 0.4rem;
+  font-size: 0.9rem;
+  outline: none;
+}
+/* Aistudio.css */
+
+/* ... your existing CSS ... */
+
+/* --- ADD THIS CSS FOR THE MODEL SELECTOR --- */
+.model-selector-container {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 8px;
+}
+
+.model-selector {
+    background-color: #333; /* Dark background */
+    color: #e0e0e0;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.model-selector:focus {
+    outline: none;
+    border-color: #5a5a5a;
+}
+.loading-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.6);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+}
+
+.loading-popup {
+  background: #ffffff;
+  padding: 2rem 3rem;
+  border-radius: 12px;
+  box-shadow: 0 5px 20px rgba(0, 0, 0, 0.2);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.5rem;
+  max-width: 400px;
+  text-align: center;
+}
+
+.loading-spinner {
+  width: 48px;
+  height: 48px;
+  border: 5px solid #f3f3f3; /* Light grey */
+  border-top: 5px solid #3498db; /* Blue */
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+.loading-message {
+  font-size: 1rem;
+  color: #333;
+  font-weight: 500;
+  margin: 0;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+/* Add these styles to your Aistudio.css file */
+
+.synthesized-answer {
+  margin-bottom: 2rem;
+}
+
+.summary-text {
+  line-height: 1.7;
+  color: #e0e0e0;
+  font-size: 1rem;
+  white-space: pre-wrap; /* Allows for paragraphs in the summary */
+}
+
+.key-points-title {
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+  font-size: 1.1rem;
+  color: #f0f0f0;
+  border-bottom: 1px solid #444;
+  padding-bottom: 0.5rem;
+}
+
+.key-points-list {
+  list-style-type: disc;
+  padding-left: 20px;
+  line-height: 1.8;
+  color: #cccccc;
+}
+
+.source-list-container {
+  margin-top: 2rem;
+  border-top: 1px solid #555;
+  padding-top: 1rem;
+}
+
+.sources-title {
+  font-size: 1rem;
+  color: #aaa;
+  margin-bottom: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.source-item {
+  margin-bottom: 1rem;
+  padding: 12px;
+  border-radius: 8px;
+  background-color: #333641;
+  transition: background-color 0.2s ease;
+}
+
+.source-item:hover {
+  background-color: #3c404d;
+}
+
+.source-link {
+  text-decoration: none;
+  color: inherit;
+  display: block;
+}
+
+.source-title {
+  font-size: 0.95rem;
+  color: #d1d5db;
+  margin: 0 0 4px 0;
+}
+
+.source-url {
+  font-size: 0.8rem;
+  color: #888;
+  word-break: break-all;
+}
+
+.error-message {
+  color: #ff8a80; /* A reddish color for errors */
+  background-color: rgba(255, 138, 128, 0.1);
+  padding: 1rem;
+  border-radius: 8px;
+  border: 1px solid #ff8a80;
+}
+/* Aistudio.css (add these new styles) */
+
+/* ... your existing styles ... */
+
+.full-results-container {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid #e0e0e0; /* A separator line */
+}
+
+.full-results-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 16px;
+}
+
+.full-results-list {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.full-result-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.result-link {
+  text-decoration: none;
+}
+
+.result-link h4 {
+  font-size: 1.1rem;
+  font-weight: 500;
+  color: #1a0dab; /* Classic link blue */
+  margin: 0;
+  margin-bottom: 2px;
+}
+
+.result-link:hover h4 {
+  text-decoration: underline;
+}
+
+.result-url {
+  font-size: 0.85rem;
+  color: #006621; /* Green URL color */
+  word-break: break-all;
+}
+
+.result-snippet {
+  font-size: 0.9rem;
+  color: #545454;
+  margin-top: 6px;
+  line-height: 1.5;
+}
+/* Add these styles to your existing Aistudio.css file */
+
+.sources-container {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #e5e7eb; /* A light separator line */
+}
+
+.sources-title {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: white; 
+  font-family: 'Franklin Gothic Medium', 'Arial Narrow', Arial, sans-serif;
+  margin-bottom: 1rem;
+}
+
+.sources-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.source-item {
+  line-height: 1.5;
+}
+
+.source-link {
+  font-weight: 500;
+  color: #2563eb; /* A standard blue link color */
+  text-decoration: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5em;
+}
+
+.source-link:hover {
+  text-decoration: underline;
+  color: #1d4ed8;
+}
+
+.source-index {
+  color: #6b7280; /* A grey color for the number */
+  font-weight: 400;
+}
+
+.source-snippet {
+  font-size: 0.875rem;
+  color: #4b5563; /* Slightly darker grey for better readability */
+  margin: 0.25rem 0 0 1.5em; /* Indent snippet under the link */
+  border-left: 2px solid #f3f4f6;
+  padding-left: 0.75em;
+}
+
+.action-buttons-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #e5e7eb;
+}
+/*
+  In your Aistudio.css file, find the old rules for the components
+  we're changing and replace them with these new, improved rules.
+*/
+
+/* --- Position the AI Avatar correctly --- */
+.ai-response {
+    display: flex;
+    gap: 1rem;
+    align-items: flex-start; /* Aligns avatar to the top */
+}
+
+/* --- Keep the main content flexible --- */
+.response-content {
+  position: relative;
+  flex: 1; /* Allows the content to take up the remaining space */
+}
+
+/* --- *** MODIFIED: Response Actions Menu (Three Dots) *** --- */
+.response-actions-menu {
+  position: absolute;
+  top: -80px; /* MOVED UP: Adjust this value to your liking */
+  right: 0;
+  z-index: 5; /* Ensure it's above other content but below modals */
+}
+
+.menu-toggle-button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 8px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6b7280;
+}
+
+.menu-toggle-button:hover {
+  background-color: #f3f4f6;
+  color: #1f2937;
+}
+
+.actions-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  background-color: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  z-index: 10;
+  width: 160px;
+  padding: 8px 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.actions-dropdown button {
+  background: none;
+  border: none;
+  text-align: left;
+  padding: 8px 16px;
+  cursor: pointer;
+  width: 100%;
+  font-size: 14px;
+}
+
+.actions-dropdown button:hover {
+  background-color: #f9fafb;
+}
+
+.actions-dropdown button:disabled {
+  color: #9ca3af;
+  cursor: not-allowed;
+}
+
+.pdf-error {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  font-size: 12px;
+  color: #ef4444;
+}
+
+/* --- *** MODIFIED: Podcast Modal Styling *** --- */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  /* NEW: Add a fade-in animation */
+  animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.modal-content {
+  background-color: white;
+  padding: 2rem;
+  border-radius: 12px;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  position: relative;
+  /* NEW: Define width and height */
+  width: 400px;
+  height: 350px;
+  /* NEW: Center the content inside the modal */
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  /* NEW: Add a pop-in animation */
+  animation: popIn 0.3s ease-out;
+}
+
+@keyframes popIn {
+  from { 
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to { 
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.modal-close-button {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  color: #9ca3af;
+}
+
+.modal-close-button:hover {
+  color: #1f2937;
+}
+
+.podcast-generator {
+  display: flex;
+  flex-direction: column;
+  align-items: center; /* NEW: Ensure all items are centered */
+  gap: 1.5rem; /* NEW: Increase spacing between elements */
+  width: 100%; /* NEW: Ensure it takes the full width of the modal content */
+}
+
+/* NEW: Style the title inside the modal */
+.podcast-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.podcast-topic {
+  font-size: 0.9rem;
+  color: #6b7280;
+  border-left: none; /* Remove border */
+  padding-left: 0; /* Remove padding */
+  margin: 0;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis; /* Handle long topics nicely */
+}
+
+/* NEW: Style the language dropdown */
+.language-select {
+  padding: 10px 15px;
+  border-radius: 8px;
+  border: 1px solid #d1d5db;
+  font-size: 1rem;
+  width: 80%;
+  cursor: pointer;
+  background-color: #f9fafb;
+}
+
+/* NEW: Style the generate button */
+.generate-podcast-button {
+  padding: 12px 24px;
+  font-size: 1rem;
+  font-weight: 500;
+  border-radius: 8px;
+  border: none;
+  background-color: #2563eb;
+  color: white;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  width: 80%;
+}
+
+.generate-podcast-button:hover {
+  background-color: #1d4ed8;
+}
+
+.generate-podcast-button:disabled {
+  background-color: #9ca3af;
+  cursor: not-allowed;
+}
+
+/* Don't forget to keep this rule from before */
+.action-buttons-container {
+  display: none; /* Hide the old container */
+}
+/* Add this new rule to Aistudio.css */
+
+.audio-player {
+  width: 100%;
+  margin-top: 1rem;
+}
+/* --- ADD THESE STYLES FOR THE FOLLOW-UP QUESTIONS --- */
+
+.follow-up-container {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid #e7e7e7; /* A slightly lighter border */
+}
+
+.follow-up-title {
+  font-size: 1.2rem; /* 16px */
+  font-weight: 600;
+  font-family: 'Franklin Gothic Medium', 'Arial Narrow', Arial, sans-serif;
+  color: white; /* A darker, more readable grey */
+  margin-bottom: 16px;
+}
+
+
+.questions-wrapper {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.follow-up-question {
+  display: flex;
+  align-items: center;
+  background-color: #f8f9fa; /* A very light grey background */
+  border: 1px solid #dfe1e5;
+  border-radius: 18px; /* More rounded for a 'pill' look */
+  padding: 8px 16px;
+  font-size: 0.875rem; /* 14px */
+  color: #3c4043;
+  cursor: pointer;
+  transition: all 0.2s ease-in-out;
+}
+
+.follow-up-question:hover {
+  background-color: #fff;
+  border-color: #c6c6c6;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  transform: translateY(-1px);
+}
+/* 
+==========================================================================
+  IMMERSIVE FULL-SCREEN PREVIEW STYLES
+========================================================================== 
+*/
+
+.print-preview-container {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background-color: #E8EAED; /* A neutral, professional grey background */
+  position: relative; /* For positioning the exit button */
+}
+
+/* --- The fixed top-right exit button --- */
+.preview-exit-button {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 1100; /* Ensures it's above the scrollable content */
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 18px;
+  border-radius: 8px;
+  font-weight: 500;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: 1px solid rgba(0,0,0,0.1);
+  background-color: rgba(255, 255, 255, 0.9);
+  color: #374151;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  backdrop-filter: blur(4px);
+}
+.preview-exit-button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+}
+
+
+/* --- The scrolling area for the page --- */
+.print-preview-body {
+  flex-grow: 1;
+  overflow-y: auto;
+  padding: 40px 24px;
+  text-align: center;
+}
+
+/* --- The White Document Page --- */
+.pdf-page {
+  width: 100%;
+  max-width: 210mm;
+  padding: 1in;
+  margin: 0 auto;
+  background: #fff;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+  border: 1px solid #DCDCDC;
+  text-align: left;
+  box-sizing: border-box;
+  font-family: Georgia, 'Times New Roman', Times, serif;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #333333;
+}
+
+/* --- Typography inside the Page --- */
+.pdf-page-title {
+  font-size: 24px;
+  font-weight: bold;
+  font-family: 'Helvetica Neue', Arial, sans-serif;
+  margin-top: 0;
+  margin-bottom: 28px;
+  color: #111;
+  border-bottom: 2px solid #333;
+  padding-bottom: 8px;
+}
+.pdf-page-summary {
+  white-space: pre-wrap;
+  margin-bottom: 28px;
+}
+.pdf-page-takeaways {
+  font-size: 16px;
+  font-weight: bold;
+  font-family: 'Helvetica Neue', Arial, sans-serif;
+  margin-top: 28px;
+  margin-bottom: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #ccc;
+  color: #111;
+}
+.pdf-page-list {
+  padding-left: 24px;
+  margin: 0;
+}
+.pdf-page-list li {
+  margin-bottom: 10px;
+}
+
+/* --- The footer INSIDE the page for the download button --- */
+.pdf-page-footer {
+    margin-top: 48px;
+    padding-top: 24px;
+    border-top: 1px dashed #ccc;
+    text-align: center;
+}
+.pdf-page-footer .pdf-error {
+    margin-bottom: 12px;
+    color: #d93025;
+}
+
+
+/* 
+==========================================================================
+  PRINT-ONLY STYLES 
+========================================================================== 
+*/
+@media print {
+  /* Hide the exit button and the sidebar when printing */
+  .non-printable, .sidebar {
+    display: none !important;
+  }
+  
+  /* Reset the container styles for printing */
+  .print-preview-container, .print-preview-body {
+      background: none;
+      padding: 0;
+  }
+
+  /* Make only the printable page visible */
+  .printable-area, .printable-area * {
+    visibility: visible;
+  }
+  
+  /* Reposition the page to fill the entire print sheet */
+  .printable-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+}
+/* Aistudio.css */
+/* --- ADD THESE STYLES TO YOUR EXISTING CSS FILE --- */
+
+
+/*
+===========================================================
+    QUIZ MODAL & FULLSCREEN STYLES
+===========================================================
+*/
+
+/* --- Modal Base Style (Before Fullscreen) --- */
+/* This is a fallback for when fullscreen is denied */
+.quiz-modal {
+    display: flex;
+    flex-direction: column;
+    width: 90%;
+    max-width: 800px;
+    height: 90vh;
+    max-height: 700px;
+    padding: 0;
+    overflow: hidden; /* Important */
+    background-color: #ffffff;
+    justify-content: center; /* Center loading/error states */
+    align-items: center;
+}
+
+/* --- Styles Applied ONLY in Fullscreen Mode --- */
+.quiz-modal:fullscreen {
+    width: 100%;
+    height: 100%;
+    max-width: 100%;
+    max-height: 100%;
+    border-radius: 0;
+    background-color: #f9fafb; /* A light grey background for the whole screen */
+}
+
+.quiz-modal-header {
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid #e0e0e0;
+    flex-shrink: 0;
+    width: 100%;
+    background-color: #ffffff;
+}
+
+.quiz-modal-header h3 {
+    margin: 0;
+    font-size: 1.2rem;
+}
+
+/* This is the scrollable area */
+.quiz-modal-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1.5rem;
+    width: 100%;
+}
+
+/* In fullscreen, we want the body to scroll within a max-width container for readability */
+.quiz-modal:fullscreen .quiz-modal-body {
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.quiz-modal-footer {
+    padding: 1rem 1.5rem;
+    border-top: 1px solid #e0e0e0;
+    background-color: #fff;
+    text-align: right;
+    flex-shrink: 0;
+    width: 100%;
+    display: flex;
+    justify-content: flex-end;
+    gap: 1rem;
+}
+
+/* --- Loading and Error States --- */
+.quiz-loading, .quiz-error {
+    text-align: center;
+    gap: 1rem;
+    color: #555;
+    padding: 2rem;
+}
+
+.loading-spinner {
+  width: 50px;
+  height: 50px;
+  border: 5px solid #f3f3f3;
+  border-top: 5px solid #4a90e2;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin: 0 auto 1rem;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+
+/* --- Quiz Content Styling (Questions/Options) --- */
+.quiz-question-block {
+    margin-bottom: 2rem;
+    padding: 1.5rem;
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+    border: 1px solid #e5e7eb;
+}
+
+.quiz-question-text {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 1rem;
+    line-height: 1.5;
+    color: #111827;
+}
+
+.quiz-options-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.quiz-option-label {
+    display: flex;
+    align-items: center;
+    padding: 0.8rem 1rem;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s ease-in-out;
+    color: black;
+}
+
+.quiz-option-label:hover {
+    border-color: #60a5fa;
+    background-color: #f0f5ff;
+}
+
+.quiz-option-label.selected {
+    background-color: #dbeafe;
+    border-color: #3b82f6;
+    color: red;
+    font-weight: 500;
+}
+
+.quiz-option-label input[type="radio"] {
+    margin-right: 12px;
+    accent-color: #3b82f6;
+    transform: scale(1.2);
+}
+
+/* --- Results View Styling --- */
+.quiz-results-summary {
+    text-align: center;
+    margin-bottom: 2rem;
+    padding: 1.5rem;
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+}
+
+.quiz-score-badge {
+    font-size: 1.5rem;
+    font-weight: bold;
+    color: #1f2937;
+    margin-top: 0.5rem;
+}
+
+.quiz-result-item {
+    margin-bottom: 1rem;
+    padding: 1rem 1.25rem;
+    border-left: 5px solid;
+    border-radius: 6px;
+}
+.quiz-result-item.correct { border-color: #22c55e; background-color: #f0fdf4; }
+.quiz-result-item.incorrect { border-color: #ef4444; background-color: #fef2f2; }
+.quiz-result-explanation { color: #4b5563; font-size: 0.9rem; line-height: 1.6; }
+
+
+/* --- Buttons --- */
+.quiz-submit-button {
+    background-color: #3b82f6;
+    color: white;
+    padding: 10px 20px;
+    border: none;
+    border-radius: 6px;
+    font-weight: bold;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background-color 0.2s;
+    margin: 0;
+}
+
+.quiz-submit-button:hover { background-color: #2563eb; }
+.quiz-submit-button.secondary { background-color: #6b7280; }
+.quiz-submit-button.secondary:hover { background-color: #4b5563; }
+/* Add this to the bottom of Aistudio.css */
+
+.selenium-results-container {
+  margin-top: 30px;
+  border-top: 1px solid #e0e0e0;
+  padding-top: 20px;
+}
+
+.selenium-results-title {
+  color: #28a745;
+  margin-bottom: 15px;
+  font-size: 1.2rem;
+}
+
+.result-item-selenium {
+  margin-bottom: 25px;
+  padding: 15px;
+  border: 1px solid #eaeaea;
+  border-radius: 8px;
+  background-color: #ffffff;
+}
+
+.result-title-selenium {
+  margin: 0 0 8px 0;
+  font-size: 1.1rem;
+}
+
+.result-link-selenium {
+  color: #0066cc;
+  text-decoration: none;
+  display: block;
+  margin-bottom: 12px;
+  word-break: break-all;
+  font-size: 0.9rem;
+}
+
+.result-link-selenium:hover {
+  text-decoration: underline;
+}
+
+.result-item-selenium h5 {
+    margin-top: 15px;
+    margin-bottom: 5px;
+    color: #555;
+    font-size: 0.95rem;
+}
+
+.result-content-selenium {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  background-color: #f8f9fa;
+  padding: 12px;
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: 0.85rem;
+  border: 1px solid #e9ecef;
+  border-radius: 4px;
+  line-height: 1.6;
+  color: #333;
+}

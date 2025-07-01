@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# logs
+logs/
+*.log
+
+# env files
+
+# Chrome driver cache or crash logs
+chromedriver.log
+selenium-debug.log
+
+# misc
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
