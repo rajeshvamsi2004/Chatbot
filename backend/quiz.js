@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-
+const multer = require('multer')
 const app = express();
 const port = 5005;
 
@@ -110,6 +110,93 @@ app.post('/generate-recommendations', async (req, res) => {
         res.status(500).json({ error: 'Failed to generate recommendations. The AI model may be temporarily unavailable.' });
     }
 });
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
+
+// --- Gemini API Setup ---
+if (!process.env.GEMINI_API_KEY) {
+  throw new Error("GEMINI_API_KEY is not defined in the .env file");
+}
+// --- API Endpoint for File Analysis ---
+// The 'upload.single('file')' part tells multer to expect one file named 'file'
+app.post('/api/analyze-file', upload.single('file'), async (req, res) => {
+  // Check if a file was uploaded
+  if (!req.file) {
+    return res.status(400).json({ error: "No file was uploaded." });
+  }
+
+  try {
+    let extractedText = '';
+    const file = req.file;
+
+    // --- Text Extraction Logic ---
+    if (file.mimetype === 'application/pdf' || file.originalname.toLowerCase().endsWith('.pdf')) {
+      const data = await pdf(file.buffer);
+      extractedText = data.text;
+    } else if (file.mimetype === 'text/plain' || file.originalname.toLowerCase().endsWith('.txt')) {
+      extractedText = file.buffer.toString('utf-8');
+    } else {
+      return res.status(400).json({ error: "Unsupported file type. Please upload a .txt or .pdf file." });
+    }
+
+    if (!extractedText.trim()) {
+      return res.status(400).json({ error: "Could not extract any text from the file. It might be empty or an image-based PDF." });
+    }
+    
+    // --- Analysis with Gemini ---
+    const prompt = `
+      Analyze the following document and provide a concise summary and a list of key takeaways.
+
+      Document Content:
+      ---
+      ${extractedText.substring(0, 15000)} 
+      ---
+
+      Format your response strictly as a JSON object with two keys: "summary" and "key_points" (which must be an array of strings).
+      Do not include any other text or markdown formatting outside of the JSON object.
+      Example:
+      {
+          "summary": "A brief overview of the document's main points.",
+          "key_points": [
+              "First important takeaway.",
+              "Second important takeaway."
+          ]
+      }
+    `;
+
+    const result = await geminiModel.generateContent(prompt);
+    const responseText = result.response.text();
+    
+    let analysisData;
+    try {
+        // Gemini often wraps JSON in markdown, so we clean it up before parsing
+        const cleanJsonString = responseText.replace(/```json|```/g, '').trim();
+        analysisData = JSON.parse(cleanJsonString);
+    } catch (e) {
+        console.error("Failed to parse Gemini JSON response:", e);
+        // Fallback if Gemini doesn't return valid JSON
+        analysisData = {
+            summary: "The AI returned a response, but it was not in the expected JSON format. Here is the raw response: " + responseText,
+            key_points: []
+        };
+    }
+    
+    // Add empty arrays to match the data structure your frontend expects
+    const finalResponse = {
+        ...analysisData,
+        sources: [],
+        all_search_results: [],
+        follow_up_questions: []
+    };
+
+    res.json(finalResponse);
+
+  } catch (error) {
+    console.error("Error during file analysis:", error);
+    res.status(500).json({ error: "An internal server error occurred during file analysis." });
+  }
+});
+
 
 app.listen(port, () => {
     console.log(`✅ Backend server running at http://localhost:${port}.`);

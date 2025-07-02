@@ -7,6 +7,10 @@ const cheerio = require('cheerio');
 const cors = require('cors');
 require('dotenv').config();
 
+const multer = require('multer');
+// ▼▼▼ 1. PDF PARSING LIBRARY HAS BEEN SWAPPED ▼▼▼
+const PDFParser = require("pdf2json"); 
+
 const { JSDOM } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
@@ -19,11 +23,12 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
+
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// ▼▼▼ NEW CODE BLOCK START ▼▼▼
-
-// --- Job Search Function ---
+// --- Job Search Function (UNCHANGED) ---
 async function searchJobs(jobQuery, location = 'USA', page = '1') {
     const options = {
         method: 'GET',
@@ -42,40 +47,32 @@ async function searchJobs(jobQuery, location = 'USA', page = '1') {
     try {
         console.log(`[JOB SEARCH] Querying JSearch API for: "${jobQuery} in ${location}"`);
         const response = await axios.request(options);
-        // The JSearch API wraps the job listings in a `data` property
-        return response.data.data; 
+        return response.data.data;
     } catch (error) {
         console.error("❌ JSearch API Error:", error.message);
-        // Return null or an empty array to indicate failure
-        return null; 
+        return null;
     }
 }
 
-// --- New Job Search Endpoint ---
+// --- New Job Search Endpoint (UNCHANGED) ---
 app.get('/jobs', async (req, res) => {
-    // Get the job title and location from the request body
     const { query, location } = req.body;
 
     if (!query) {
         return res.status(400).json({ error: 'Job "query" is required.' });
     }
 
-    // Call our new job search function
     const jobs = await searchJobs(query, location);
 
     if (jobs) {
-        // If we got jobs, send them back to the client
         res.status(200).json(jobs);
     } else {
-        // If there was an error, send a server error status
         res.status(500).json({ error: 'Failed to fetch job listings.' });
     }
 });
 
-// ▲▲▲ NEW CODE BLOCK END ▲▲▲
 
-
-// --- Sanitize query ---
+// --- Sanitize query (UNCHANGED) ---
 function sanitizeQuery(query) {
     const instructionalWords = ['explain about', 'explain', 'what is', 'what are', 'who is', 'who are', 'tell me about', 'give me information on', 'define', 'definition of'];
     let sanitized = query.toLowerCase().trim();
@@ -91,9 +88,10 @@ function sanitizeQuery(query) {
 
 const { URL } = require('url');
 
+// --- DuckDuckGo Search Functions (UNCHANGED) ---
 function decodeDuckDuckGoUrl(href) {
     try {
-        const urlObj = new URL('https://duckduckgo.com' + href); // make it full URL
+        const urlObj = new URL('https://duckduckgo.com' + href);
         const realUrl = decodeURIComponent(urlObj.searchParams.get('uddg'));
         return realUrl;
     } catch (e) {
@@ -113,8 +111,8 @@ async function duckDuckGoSearch(query) {
 
         $('a.result__a').each((i, el) => {
             const title = $(el).text();
-            const rawLink = $(el).attr('href'); // DuckDuckGo redirect link
-            const realLink = decodeDuckDuckGoUrl(rawLink); // Extract real URL
+            const rawLink = $(el).attr('href');
+            const realLink = decodeDuckDuckGoUrl(rawLink);
             const snippet = $(el).closest('.result').find('.result__snippet').text().trim();
             if (realLink) {
                 results.push({ title, link: realLink, snippet });
@@ -129,7 +127,7 @@ async function duckDuckGoSearch(query) {
 }
 
 
-// --- Crawl and extract content from article ---
+// --- Crawl and extract content from article (UNCHANGED) ---
 async function crawlAndExtract(url, title) {
     console.log(`\t[CRAWL] Attempting to crawl: ${url}`);
     try {
@@ -145,10 +143,9 @@ async function crawlAndExtract(url, title) {
 
         if (article && article.textContent) {
             console.log(`\t[CRAWL] ✅ SUCCESS for: ${url}`);
-            // Limit content to avoid overly large prompts
             return {
                 title,
-                textContent: article.textContent.trim().substring(0, 8000) 
+                textContent: article.textContent.trim().substring(0, 8000)
             };
         }
 
@@ -160,7 +157,7 @@ async function crawlAndExtract(url, title) {
     }
 }
 
-// --- Main API Endpoint ---
+// --- Main API Endpoint (UNCHANGED) ---
 app.post('/api', async (req, res) => {
     const { query } = req.body;
     if (!query) {
@@ -201,10 +198,8 @@ app.post('/api', async (req, res) => {
         crawledSettled.forEach((result, index) => {
             const originalSource = linksToAnalyze[index];
             if (result.status === 'fulfilled' && result.value && result.value.textContent) {
-                // Crawling was successful, use the full extracted text
                 extracted.push(result.value);
             } else {
-                // Crawling failed, use the search result snippet as a fallback
                 console.log(`\t[CRAWL] ⚠️ Fallback to snippet for: ${originalSource.link}`);
                 if (originalSource.snippet) { 
                     extracted.push({
@@ -225,7 +220,6 @@ app.post('/api', async (req, res) => {
             `--- Source ${i + 1}: ${c.title} ---\n${c.textContent}\n\n`
         ).join('');
         
-        // ▼▼▼ MODIFIED PROMPT TO INCLUDE follow_up_questions ▼▼▼
         const prompt = `
 You are an expert research analyst. Your task is to provide a comprehensive and detailed answer to the user's query based *only* on the provided text from the following web sources.
 
@@ -271,12 +265,11 @@ Do not include any information not present in the provided sources. Your respons
             : [];
 
         console.log('[5/5] Successfully generated response.');
-        // ▼▼▼ MODIFIED RESPONSE TO INCLUDE follow_up_questions ▼▼▼
         res.json({
             summary: parsed.summary,
             key_points: parsed.key_points,
             sources: sourcesUsed,
-            follow_up_questions: parsed.follow_up_questions || [], // Add this line
+            follow_up_questions: parsed.follow_up_questions || [],
             all_search_results: uniqueSources
         });
 
@@ -287,13 +280,110 @@ Do not include any information not present in the provided sources. Your respons
 });
 
 
-// --- History Routes ---
+// ▼▼▼ 2. UPDATED FILE ANALYSIS ENDPOINT TO USE pdf2json ▼▼▼
+app.post('/api/analyze-file', upload.single('file'), async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file was uploaded." });
+    }
+  
+    try {
+        console.log(`[FILE] Received file: ${req.file.originalname} | Size: ${req.file.size} bytes`);
+        let extractedText = '';
+        const file = req.file;
+  
+        if (file.mimetype === 'application/pdf' || file.originalname.toLowerCase().endsWith('.pdf')) {
+            console.log('[FILE] Parsing PDF with pdf2json...');
+            
+            // pdf2json is event-based, so we wrap it in a Promise for async/await
+            const parsePdf = new Promise((resolve, reject) => {
+                const pdfParser = new PDFParser(this, 1);
+
+                pdfParser.on("pdfParser_dataError", errData => {
+                    console.error("pdf2json Error:", errData.parserError);
+                    reject(new Error("Failed to parse PDF. It might be corrupted or in an unsupported format."));
+                });
+
+                pdfParser.on("pdfParser_dataReady", () => {
+                    const textContent = pdfParser.getRawTextContent();
+                    console.log('[FILE] pdf2json parsing complete.');
+                    resolve(textContent);
+                });
+
+                pdfParser.parseBuffer(file.buffer);
+            });
+            
+            extractedText = await parsePdf;
+
+        } else if (file.mimetype === 'text/plain' || file.originalname.toLowerCase().endsWith('.txt')) {
+            console.log('[FILE] Reading text file...');
+            extractedText = file.buffer.toString('utf-8');
+        } else {
+            return res.status(400).json({ error: "Unsupported file type. Please upload a .txt or .pdf file." });
+        }
+  
+        if (!extractedText || !extractedText.trim()) {
+            return res.status(400).json({ error: "Could not extract any text from the file. It might be empty or an image-based PDF." });
+        }
+
+        console.log(`[FILE] Extracted ${extractedText.length} characters. Generating summary...`);
+      
+        const prompt = `
+        Analyze the following document and provide a concise summary and a list of key takeaways.
+        
+        Document Content:
+        ---
+        ${extractedText.substring(0, 15000)} 
+        ---
+  
+        Format your response strictly as a JSON object with two keys: "summary" and "key_points" (which must be an array of strings).
+        Do not include any other text or markdown formatting outside of the JSON object.
+        Example:
+        {
+            "summary": "A brief overview of the document's main points.",
+            "key_points": [
+                "First important takeaway.",
+                "Second important takeaway."
+            ]
+        }
+      `;
+  
+      const model = genAI.getGenerativeModel({
+        model: "gemini-1.5-flash-latest",
+        generationConfig: {
+            response_mime_type: "application/json",
+        },
+    });
+
+      const result = await model.generateContent(prompt);
+      const responseText = result.response.text();
+      let analysisData = JSON.parse(responseText);
+      
+      const finalResponse = {
+          ...analysisData,
+          sources: [],
+          all_search_results: [],
+          follow_up_questions: []
+      };
+  
+      console.log('[FILE] Successfully generated file analysis.');
+      res.json(finalResponse);
+  
+    } catch (error) {
+      console.error("❌ Error during file analysis:", error);
+      const errorMessage = error.message || "An internal server error occurred during file analysis.";
+      res.status(500).json({ error: errorMessage });
+    }
+  });
+// ▲▲▲ FILE ANALYSIS ENDPOINT UPDATE COMPLETE ▲▲▲
+
+
+// --- History Routes (UNCHANGED) ---
 app.post('/api/history', async (req, res) => { try { const { query } = req.body; if (!query) return res.status(400).json({ msg: 'Query is required.' }); const saved = await new History({ query }).save(); res.status(201).json(saved); } catch (error) { res.status(500).json({ msg: 'Failed to save history.' }); } });
 app.get('/api/history', async (req, res) => { try { const all = await History.find().sort({ createdAt: -1 }); res.status(200).json(all); } catch (error) { res.status(500).json({ msg: 'Error fetching history.' }); } });
 app.delete('/api/history/:id', async (req, res) => { try { const deleted = await History.findByIdAndDelete(req.params.id); if (!deleted) return res.status(404).json({ message: 'Not found' }); res.status(200).json({ message: 'Deleted successfully' }); } catch (error) { res.status(500).json({ message: 'Error deleting item' }); } });
 app.put('/api/history/:id', async (req, res) => { try { const { query } = req.body; const updated = await History.findByIdAndUpdate(req.params.id, { query }, { new: true }); if (!updated) return res.status(404).json({ message: 'Item not found' }); res.status(200).json(updated); } catch (error) { res.status(500).json({ message: 'Error updating item' }); } });
 
-// --- MongoDB Connection & Server Start ---
+// --- MongoDB Connection & Server Start (UNCHANGED) ---
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('✅ MongoDB connected'))
     .catch(err => console.error('❌ MongoDB connection error:', err));

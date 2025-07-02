@@ -1239,3 +1239,40 @@ body { margin: 0; background-color: var(--bg-dark); color: var(--text-primary); 
   line-height: 1.6;
   color: #333;
 }
+/* Add this CSS for the file delete button */
+
+.file-item-container {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.file-item-name {
+  flex-grow: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Making the clickable area bigger */
+  padding: 8px 4px 8px 0;
+}
+
+.file-delete-button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 8px;
+  margin-left: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #a9a9a9;
+  border-radius: 4px;
+  flex-shrink: 0; /* Prevents the button from shrinking */
+}
+
+.file-delete-button:hover {
+  color: #fff;
+  background-color: #444550;
+}

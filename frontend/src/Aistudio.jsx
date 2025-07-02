@@ -1,5 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import './Aistudio.css';
+
+// --- (Your QuizGenerator component remains unchanged) ---
 const QuizGenerator = ({ sourceText, onClose }) => {
     // --- State Management ---
     const [view, setView] = useState('loading'); // loading, quiz, levelComplete, results
@@ -363,7 +365,34 @@ const BackIcon = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="non
 const LoadingOverlay = ({ messages }) => { const [currentMessageIndex, setCurrentMessageIndex] = useState(0); useEffect(() => { const interval = setInterval(() => { setCurrentMessageIndex(prevIndex => (prevIndex + 1) % messages.length); }, 2500); return () => clearInterval(interval); }, [messages]); return (<div className="loading-overlay"><div className="loading-popup"><div className="loading-spinner"></div><p className="loading-message">{messages[currentMessageIndex]}</p></div></div>); };
 const PodcastGenerator = ({ topic, onClose }) => { const [language, setLanguage] = useState('en'); const [isLoading, setIsLoading] = useState(false); const [error, setError] = useState(null); const [audioUrl, setAudioUrl] = useState(null); const audioPlayerRef = useRef(null); useEffect(() => { if (audioUrl && audioPlayerRef.current) { audioPlayerRef.current.play().catch(error => { console.error("Audio play was prevented:", error); setError("Playback was blocked by the browser. Please press play manually."); }); } }, [audioUrl]); const handleGenerate = async () => { if (!topic) return; setIsLoading(true); setError(null); setAudioUrl(null); try { const res = await fetch('http://localhost:5002/podcast', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ topic, targetLanguage: language }) }); const contentType = res.headers.get('content-type'); if (!res.ok || !contentType || !contentType.startsWith('audio/')) { const errData = await res.json().catch(() => ({ error: "Server returned a non-JSON error response." })); throw new Error(errData.error || 'Server did not return valid audio.'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); setAudioUrl(url); } catch (err) { console.error(err); setError(`Failed to generate audio: ${err.message}`); } finally { setIsLoading(false); } }; return ( <div className="modal-overlay" onClick={onClose}><div className="modal-content" onClick={e => e.stopPropagation()}><button className="modal-close-button" onClick={onClose}><CloseIcon /></button><div className="podcast-generator"><h3 className="podcast-title">🎙️ Listen to Explanation</h3><p className="podcast-topic">Topic: {topic.substring(0, 100)}...</p>{audioUrl ? ( <audio ref={audioPlayerRef} src={audioUrl} controls className="audio-player"> Your browser does not support the audio element. </audio> ) : ( <> <select className="language-select" value={language} onChange={(e) => setLanguage(e.target.value)} disabled={isLoading}> <option value="en">English</option> <option value="hi">Hindi</option> <option value="te">Telugu</option> <option value="ta">Tamil</option> <option value="es">Spanish</option> </select> <button className="generate-podcast-button" onClick={handleGenerate} disabled={isLoading || !topic}> {isLoading ? 'Generating...' : 'Generate Podcast'} </button> </> )}{error && <p className="error-message">{error}</p>}</div></div></div> ); };
 const HistoryItem = ({ item, onDelete, onRename }) => { const [isMenuOpen, setIsMenuOpen] = useState(false); const [isRenaming, setIsRenaming] = useState(false); const [editedQuery, setEditedQuery] = useState(item.query); const menuRef = useRef(null); useEffect(() => { const handleClickOutside = (event) => { if (menuRef.current && !menuRef.current.contains(event.target)) setIsMenuOpen(false); }; document.addEventListener("mousedown", handleClickOutside); return () => document.removeEventListener("mousedown", handleClickOutside); }, [menuRef]); const handleRenameSubmit = (e) => { e.preventDefault(); onRename(item._id, editedQuery); setIsRenaming(false); setIsMenuOpen(false); }; return ( <div className="list-item-container"> {isRenaming ? ( <form onSubmit={handleRenameSubmit} className="rename-form"> <input type="text" value={editedQuery} onChange={(e) => setEditedQuery(e.target.value)} autoFocus onBlur={handleRenameSubmit} /> </form> ) : ( <span className="list-item-text">{item.query}</span> )} <div className="list-item-menu" ref={menuRef}> <button onClick={() => setIsMenuOpen(!isMenuOpen)} className="menu-button"><MoreHorizontalIcon /></button> {isMenuOpen && ( <div className="dropdown-menu"> <button onClick={() => { setIsRenaming(true); setIsMenuOpen(false); }}>Rename</button> <button onClick={() => onDelete(item._id)} className="delete-button">Delete</button> </div> )} </div> </div> ); };
-const Sidebar = ({ history, files, onNewChat, onFileImport, isOpen, onClose, onDeleteItem, onRenameItem }) => ( <aside className={`sidebar ${isOpen ? 'open' : ''}`}><button className="new-chat-button" onClick={onNewChat}><PlusIcon /> New Chat</button><div className="sidebar-section"><h3 className="section-title"><HistoryIcon /> History</h3><ul className="item-list">{history.map(item => <li key={item._id}><HistoryItem item={item} onDelete={onDeleteItem} onRename={onRenameItem} /></li>)}</ul></div><div className="sidebar-section"><h3 className="section-title"><FileIcon /> Files</h3><ul className="item-list">{files.map(item => <li key={item.id} className="list-item">{item.name}</li>)}</ul><button className="import-button" onClick={onFileImport}>Upload File</button></div></aside> );
+
+// --- MODIFIED Sidebar Component ---
+const Sidebar = ({ history, files, onNewChat, onFileImport, isOpen, onClose, onDeleteItem, onRenameItem, onAnalyzeFile }) => ( 
+    <aside className={`sidebar ${isOpen ? 'open' : ''}`}>
+        <button className="new-chat-button" onClick={onNewChat}><PlusIcon /> New Chat</button>
+        <div className="sidebar-section">
+            <h3 className="section-title"><HistoryIcon /> History</h3>
+            <ul className="item-list">{history.map(item => <li key={item._id}><HistoryItem item={item} onDelete={onDeleteItem} onRename={onRenameItem} /></li>)}</ul>
+        </div>
+        <div className="sidebar-section">
+            <h3 className="section-title"><FileIcon /> Files</h3>
+            <ul className="item-list">
+                {/* This part is now interactive */}
+                {files.map(file => (
+                    <li 
+                        key={file.name + file.lastModified} // A more robust key for File objects
+                        className="list-item file-item" 
+                        onClick={() => onAnalyzeFile(file)} // Trigger analysis on click
+                    >
+                        {file.name}
+                    </li>
+                ))}
+            </ul>
+            <button className="import-button" onClick={onFileImport}>Upload File</button>
+        </div>
+    </aside> 
+);
+
 const SynthesizedAnswer = ({ summary, keyPoints }) => ( <div className="synthesized-answer"><p className="summary-text">{summary}</p><h3 className="key-points-title">Key Takeaways</h3><ul className="key-points-list">{keyPoints && keyPoints.map((point, index) => <li key={index}>{point}</li>)}</ul></div> );
 const WelcomeScreen = ({ onExampleClick }) => ( <div className="welcome-screen"><div className="welcome-header"><span className="welcome-gradient">Hello, Rajesh</span><h1>How can I help you today?</h1></div><div className="example-prompts"><div className="prompt-card" onClick={() => onExampleClick('Best JavaScript frameworks in 2024')}><h4>Compare frameworks</h4><p>Best JavaScript frameworks</p></div><div className="prompt-card" onClick={() => onExampleClick('What are the benefits of intermittent fasting?')}><h4>Get quick answers</h4><p>on health, science, and more</p></div><div className="prompt-card" onClick={() => onExampleClick('Latest news on AI development')}><h4>Find recent articles</h4><p>on AI development</p></div><div className="prompt-card" onClick={() => onExampleClick('Top restaurants near me')}><h4>Explore nearby places</h4><p>for top-rated restaurants</p></div></div></div> );
 const LoadingSkeleton = () => ( <div className="skeleton-wrapper"><div className="skeleton-line" style={{ width: '90%' }}></div><div className="skeleton-line" style={{ width: '100%' }}></div><div className="skeleton-line" style={{ width: '95%' }}></div><div className="skeleton-line" style={{ width: '80%' }}></div></div> );
@@ -374,9 +403,10 @@ const PrintPreviewPage = ({ onExit, analysisData, userQuery }) => { const [isGen
 const ResponseActions = ({ onEnterPreviewMode, onGenerateQuiz, onPlayPodcast }) => { const [isMenuOpen, setIsMenuOpen] = useState(false); const menuRef = useRef(null); useEffect(() => { const handleClickOutside = (event) => { if (menuRef.current && !menuRef.current.contains(event.target)) setIsMenuOpen(false); }; document.addEventListener("mousedown", handleClickOutside); return () => document.removeEventListener("mousedown", handleClickOutside); }, []); return ( <div className="response-actions-menu" ref={menuRef}><button className="menu-toggle-button" onClick={() => setIsMenuOpen(!isMenuOpen)}><MoreHorizontalIcon /></button>{isMenuOpen && (<div className="actions-dropdown"><button onClick={() => { onGenerateQuiz(); setIsMenuOpen(false); }}>Generate Quiz</button><button onClick={() => { onPlayPodcast(); setIsMenuOpen(false); }}>Play Podcast</button><button onClick={() => { onEnterPreviewMode(); setIsMenuOpen(false); }}>Download / Print</button></div>)}</div> ); };
 
 
+// --- MODIFIED Aistudio Component ---
 const Aistudio = () => {
     const [history, setHistory] = useState([]);
-    const [files, setFiles] = useState([]);
+    const [files, setFiles] = useState([]); // Will now store full File objects
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
     const fileInputRef = useRef(null);
     const [isLoading, setIsLoading] = useState(false);
@@ -384,10 +414,21 @@ const Aistudio = () => {
     const [isPreviewMode, setIsPreviewMode] = useState(false);
     const [isPodcastModalOpen, setIsPodcastModalOpen] = useState(false);
     const [isQuizModalOpen, setIsQuizModalOpen] = useState(false);
-    const loadingMessages = ["Searching the web...", "Analyzing content...", "Synthesizing explanation..."];
+    
+    // Dynamic loading messages
+    const [loadingMessages, setLoadingMessages] = useState([]);
 
     useEffect(() => {
-        const fetchHistory = async () => { try { const response = await fetch('/api/history'); if (!response.ok) throw new Error('Network response was not ok'); const data = await response.json(); if (Array.isArray(data)) setHistory(data.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))); } catch (error) { console.error("Failed to fetch history:", error); } };
+        const fetchHistory = async () => { 
+            try { 
+                const response = await fetch('/api/history'); 
+                if (!response.ok) throw new Error('Network response was not ok'); 
+                const data = await response.json(); 
+                if (Array.isArray(data)) setHistory(data.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))); 
+            } catch (error) { 
+                console.error("Failed to fetch history:", error); 
+            } 
+        };
         fetchHistory();
     }, []);
 
@@ -399,6 +440,7 @@ const Aistudio = () => {
 
     const handleSearchSubmit = async (query) => {
         setIsPreviewMode(false);
+        setLoadingMessages(["Searching the web...", "Analyzing content...", "Synthesizing explanation..."]);
         setIsLoading(true);
         setAnalysisData(null);
         try {
@@ -418,16 +460,82 @@ const Aistudio = () => {
             setIsLoading(false);
         }
     };
+    
+    // --- NEW: Function to handle file analysis ---
+    const handleAnalyzeFile = async (file) => {
+        setIsSidebarOpen(false);
+        setIsPreviewMode(false);
+        setLoadingMessages(["Uploading file...", "Extracting text...", "Generating summary..."]);
+        setIsLoading(true);
+        setAnalysisData(null);
 
-    const handleFileUpload = (event) => { const uploadedFile = event.target.files[0]; if (uploadedFile) setFiles(prev => [{ id: Date.now(), name: uploadedFile.name }, ...prev]); };
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            const response = await fetch('http://localhost:5000/api/analyze-file', {
+                method: 'POST',
+                body: formData,
+            });
+
+            if (!response.ok) {
+                const errData = await response.json();
+                throw new Error(errData.error || 'Failed to analyze file');
+            }
+
+            const data = await response.json();
+            setAnalysisData({ ...data, userQuery: `Analysis of: ${file.name}` });
+
+        } catch (error) {
+            console.error(error);
+            setAnalysisData({
+                error: error.message || "Sorry, an error occurred during file analysis.",
+                userQuery: `Analysis of: ${file.name}`
+            });
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    // --- MODIFIED: Stores full File object and prevents duplicates ---
+    const handleFileUpload = (event) => { 
+        const uploadedFile = event.target.files[0]; 
+        if (uploadedFile) {
+            setFiles(prev => {
+                if (prev.some(f => f.name === uploadedFile.name)) {
+                    alert(`A file named "${uploadedFile.name}" has already been uploaded.`);
+                    return prev;
+                }
+                return [uploadedFile, ...prev];
+            });
+        }
+        event.target.value = null; // Allow re-uploading the same file
+    };
+
     const handleDeleteHistoryItem = async (id) => { setHistory(prev => prev.filter(item => item._id !== id)); try { await fetch(`/api/history/${id}`, { method: 'DELETE' }); } catch (error) { console.error(error); } };
     const handleRenameHistoryItem = async (id, newQuery) => { setHistory(prev => prev.map(item => item._id === id ? { ...item, query: newQuery } : item)); try { await fetch(`/api/history/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: newQuery }) }); } catch (error) { console.error(error); } };
 
     return (
         <div className="layout-container">
             {isLoading && <LoadingOverlay messages={loadingMessages} />}
-            <Sidebar history={history} files={files} onNewChat={handleNewChat} onFileImport={() => fileInputRef.current.click()} isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} onDeleteItem={handleDeleteHistoryItem} onRenameItem={handleRenameHistoryItem} />
-            <input type="file" ref={fileInputRef} onChange={handleFileUpload} style={{ display: 'none' }} />
+            <Sidebar 
+                history={history} 
+                files={files} 
+                onNewChat={handleNewChat} 
+                onFileImport={() => fileInputRef.current.click()} 
+                isOpen={isSidebarOpen} 
+                onClose={() => setIsSidebarOpen(false)} 
+                onDeleteItem={handleDeleteHistoryItem} 
+                onRenameItem={handleRenameHistoryItem} 
+                onAnalyzeFile={handleAnalyzeFile} // Pass new handler
+            />
+            <input 
+                type="file" 
+                ref={fileInputRef} 
+                onChange={handleFileUpload} 
+                style={{ display: 'none' }}
+                accept=".pdf,.txt" // Guide user to correct file types
+            />
             
             {isPodcastModalOpen && analysisData?.summary && (
                 <PodcastGenerator topic={analysisData.summary} onClose={() => setIsPodcastModalOpen(false)} />
@@ -454,6 +562,7 @@ const Aistudio = () => {
     );
 };
 
+// --- (MainContent and ResultsView components remain unchanged) ---
 const MainContent = ({ onMenuClick, onSearchSubmit, isLoading, analysisData, onEnterPreviewMode, onGenerateQuiz, onPlayPodcast }) => {
     const [query, setQuery] = useState('');
     const handleSearch = (e) => { e.preventDefault(); if (!query.trim() || isLoading) return; onSearchSubmit(query); };
@@ -462,15 +571,18 @@ const MainContent = ({ onMenuClick, onSearchSubmit, isLoading, analysisData, onE
     
     useEffect(() => {
         if (analysisData && analysisData.userQuery) {
-            setQuery(analysisData.userQuery);
+            // Only update the search bar for web queries, not for file analysis context
+            if (!analysisData.userQuery.startsWith('Analysis of:')) {
+                setQuery(analysisData.userQuery);
+            }
         }
     }, [analysisData]);
 
     return (
         <div className="main-content-area">
             <header className="main-header"><button className="hamburger-menu" onClick={onMenuClick}><HamburgerIcon /></button><h2>Analysis Engine</h2></header>
-            <main className="ai-main-content">{shouldShowWelcomeScreen ? <WelcomeScreen onExampleClick={handleExampleClick} /> : <ResultsView userQuery={query} isLoading={isLoading} analysisData={analysisData} onSearchSubmit={onSearchSubmit} onEnterPreviewMode={onEnterPreviewMode} onGenerateQuiz={onGenerateQuiz} onPlayPodcast={onPlayPodcast} />}</main>
-            <footer className="ai-footer"><form className="search-bar" onSubmit={handleSearch}><input type="text" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Ask me to analyze anything..." disabled={isLoading} /><button type="submit" disabled={!query.trim() || isLoading}><svg width="24" height="24" viewBox="0 0 24" fill="currentColor"><path d="M2.01 21L23 12L2.01 3L2 10L17 12L2 14L2.01 21Z" /></svg></button></form><p className="footer-notice">Answers and quizzes are generated by AI from search results.</p></footer>
+            <main className="ai-main-content">{shouldShowWelcomeScreen ? <WelcomeScreen onExampleClick={handleExampleClick} /> : <ResultsView userQuery={analysisData?.userQuery || query} isLoading={isLoading} analysisData={analysisData} onSearchSubmit={onSearchSubmit} onEnterPreviewMode={onEnterPreviewMode} onGenerateQuiz={onGenerateQuiz} onPlayPodcast={onPlayPodcast} />}</main>
+            <footer className="ai-footer"><form className="search-bar" onSubmit={handleSearch}><input type="text" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Ask me to analyze anything or select a file..." disabled={isLoading} /><button type="submit" disabled={!query.trim() || isLoading}><svg width="24" height="24" viewBox="0 0 24" fill="currentColor"><path d="M2.01 21L23 12L2.01 3L2 10L17 12L2 14L2.01 21Z" /></svg></button></form><p className="footer-notice">Answers and quizzes are generated by AI from search results and uploaded documents.</p></footer>
         </div>
     );
 };
@@ -487,9 +599,9 @@ const ResultsView = ({ userQuery, isLoading, analysisData, onSearchSubmit, onEnt
                         <ResponseActions onEnterPreviewMode={onEnterPreviewMode} onGenerateQuiz={onGenerateQuiz} onPlayPodcast={onPlayPodcast} />
                         <SynthesizedAnswer summary={analysisData.summary} keyPoints={analysisData.key_points} />
                     </>)}
-                    {analysisData.follow_up_questions && <FollowUpQuestions questions={analysisData.follow_up_questions} onQuestionClick={onSearchSubmit} />}
-                    {analysisData.sources && <SourcesList sources={analysisData.sources} />}
-                    {analysisData.all_search_results && <AllSearchResults allResults={analysisData.all_search_results} usedSources={analysisData.sources || []} />}
+                    {analysisData.follow_up_questions && analysisData.follow_up_questions.length > 0 && <FollowUpQuestions questions={analysisData.follow_up_questions} onQuestionClick={onSearchSubmit} />}
+                    {analysisData.sources && analysisData.sources.length > 0 && <SourcesList sources={analysisData.sources} />}
+                    {analysisData.all_search_results && analysisData.all_search_results.length > 0 && <AllSearchResults allResults={analysisData.all_search_results} usedSources={analysisData.sources || []} />}
                 </>))}
             </div>
         </div>
