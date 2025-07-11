@@ -1,5 +1,3 @@
-// index.js (or your main server file)
-
 const express = require('express');
 const mongoose = require('mongoose');
 const axios = require('axios');
@@ -8,12 +6,16 @@ const cors = require('cors');
 require('dotenv').config();
 
 const multer = require('multer');
-// ▼▼▼ 1. PDF PARSING LIBRARY HAS BEEN SWAPPED ▼▼▼
 const PDFParser = require("pdf2json"); 
 
 const { JSDOM } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+
+// ▼▼▼ 1. SELENIUM DEPENDENCIES ADDED ▼▼▼
+const { Builder, By, until } = require('selenium-webdriver');
+const chrome = require('selenium-webdriver/chrome');
+// Make sure you have run: npm install selenium-webdriver chromedriver
 
 const History = require('./models/History.js');
 
@@ -127,37 +129,66 @@ async function duckDuckGoSearch(query) {
 }
 
 
-// --- Crawl and extract content from article (UNCHANGED) ---
-async function crawlAndExtract(url, title) {
-    console.log(`\t[CRAWL] Attempting to crawl: ${url}`);
+// ▼▼▼ 2. NEW SELENIUM CRAWLER FUNCTION ▼▼▼
+// This function replaces the old axios-based crawlAndExtract function.
+// It uses a headless Chrome browser to load pages, execute JavaScript,
+// and then extracts the main article content.
+async function crawlAndExtractWithSelenium(url, title) {
+    console.log(`\t[SELENIUM CRAWL] Attempting to crawl: ${url}`);
+    let driver;
+
     try {
-        const response = await axios.get(url, {
-            timeout: 8000,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
-            }
-        });
-        const dom = new JSDOM(response.data, { url });
+        const options = new chrome.Options();
+        options.addArguments('--headless'); // Run in the background
+        options.addArguments('--disable-gpu');
+        options.addArguments('--no-sandbox');
+        options.addArguments('--disable-dev-shm-usage');
+        options.addArguments('--log-level=3'); // Suppress console logs from chrome
+        options.addArguments("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
+
+        driver = await new Builder()
+            .forBrowser('chrome')
+            .setChromeOptions(options)
+            .build();
+
+        // Navigate to the page with a timeout
+        await driver.get(url);
+        
+        // Wait for the body of the page to be loaded, max 15 seconds
+        await driver.wait(until.elementLocated(By.tagName('body')), 15000);
+
+        // Get the full page source after JavaScript has executed
+        const pageSource = await driver.getPageSource();
+
+        // Use Readability.js to parse the article content from the HTML
+        const dom = new JSDOM(pageSource, { url });
         const reader = new Readability(dom.window.document);
         const article = reader.parse();
 
         if (article && article.textContent) {
-            console.log(`\t[CRAWL] ✅ SUCCESS for: ${url}`);
+            console.log(`\t[SELENIUM CRAWL] ✅ SUCCESS for: ${url}`);
             return {
                 title,
                 textContent: article.textContent.trim().substring(0, 8000)
             };
+        } else {
+            console.log(`\t[SELENIUM CRAWL] ⚠️ No readable content for: ${url}`);
+            return null;
         }
 
-        console.log(`\t[CRAWL] ⚠️ No readable content for: ${url}`);
-        return null;
     } catch (err) {
-        console.log(`\t[CRAWL] ❌ ERROR: ${url} | ${err.message}`);
+        console.log(`\t[SELENIUM CRAWL] ❌ ERROR: ${url} | ${err.message}`);
         return null;
+    } finally {
+        if (driver) {
+            await driver.quit(); // Always close the browser session
+        }
     }
 }
 
-// --- Main API Endpoint (UNCHANGED) ---
+// NOTE: The old `crawlAndExtract` function has been removed as it's now replaced by the Selenium version.
+
+// --- Main API Endpoint (MODIFIED TO USE SELENIUM) ---
 app.post('/api', async (req, res) => {
     const { query } = req.body;
     if (!query) {
@@ -188,10 +219,12 @@ app.post('/api', async (req, res) => {
         });
 
         const uniqueSources = Array.from(uniqueLinks.values());
-        const linksToAnalyze = uniqueSources.slice(0, 7);
+        const linksToAnalyze = uniqueSources.slice(0, 5); // Using 5 links to balance performance and depth
 
-        console.log(`[2/5] Crawling top ${linksToAnalyze.length} sources...`);
-        const crawlPromises = linksToAnalyze.map(item => crawlAndExtract(item.link, item.title));
+        console.log(`[2/5] Crawling top ${linksToAnalyze.length} sources with Selenium...`);
+        
+        // ▼▼▼ 3. CALLING THE NEW SELENIUM FUNCTION ▼▼▼
+        const crawlPromises = linksToAnalyze.map(item => crawlAndExtractWithSelenium(item.link, item.title));
         const crawledSettled = await Promise.allSettled(crawlPromises);
 
         const extracted = [];
@@ -280,7 +313,7 @@ Do not include any information not present in the provided sources. Your respons
 });
 
 
-// ▼▼▼ 2. UPDATED FILE ANALYSIS ENDPOINT TO USE pdf2json ▼▼▼
+// --- File Analysis Endpoint (UNCHANGED) ---
 app.post('/api/analyze-file', upload.single('file'), async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: "No file was uploaded." });
@@ -294,7 +327,6 @@ app.post('/api/analyze-file', upload.single('file'), async (req, res) => {
         if (file.mimetype === 'application/pdf' || file.originalname.toLowerCase().endsWith('.pdf')) {
             console.log('[FILE] Parsing PDF with pdf2json...');
             
-            // pdf2json is event-based, so we wrap it in a Promise for async/await
             const parsePdf = new Promise((resolve, reject) => {
                 const pdfParser = new PDFParser(this, 1);
 
@@ -374,7 +406,6 @@ app.post('/api/analyze-file', upload.single('file'), async (req, res) => {
       res.status(500).json({ error: errorMessage });
     }
   });
-// ▲▲▲ FILE ANALYSIS ENDPOINT UPDATE COMPLETE ▲▲▲
 
 
 // --- History Routes (UNCHANGED) ---
