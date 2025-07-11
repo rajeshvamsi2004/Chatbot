@@ -13,7 +13,9 @@ app.use(express.json());
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// Step 1: Get Gemini explanation
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Step 1: Get Gemini explanation (No changes)
 async function explainWithGemini(topic) {
   try {
     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash-latest' });
@@ -25,49 +27,74 @@ async function explainWithGemini(topic) {
     return text;
   } catch (err) {
     console.error('[Gemini Error]', err);
-    return null; // Return null on error
+    return null;
   }
 }
 
-// Step 2: Translate and Generate TTS Audio
+// Step 2: Translate and Generate TTS Audio (UPDATED with the fix)
 async function translateAndSpeak(text, targetLang) {
     try {
         const { text: translatedText } = await translate(text, { to: targetLang });
-        const audioDataObjects = await googleTTS.getAllAudioBase64(translatedText, { lang: targetLang, slow: false });
-        const audioBuffers = audioDataObjects.map(chunk => Buffer.from(chunk.base64, 'base64'));
+        const sentences = translatedText.match(/[^.!?]+[.!?]+/g) || [translatedText];
+        console.log(`[Audio] Text split into ${sentences.length} sentences for processing.`);
+
+        const audioBuffers = [];
+
+        for (let i = 0; i < sentences.length; i++) {
+            const sentence = sentences[i];
+            if (!sentence) continue; // Skip any empty sentences
+
+            console.log(`[Audio] Generating audio for sentence ${i + 1}/${sentences.length}...`);
+
+            // --- THIS IS THE FIX ---
+            // Use getAllAudioBase64 instead of getAudioBase64.
+            // This automatically handles sentences longer than 200 characters.
+            const audioDataObjects = await googleTTS.getAllAudioBase64(sentence, {
+                lang: targetLang,
+                slow: false,
+                timeout: 10000,
+            });
+
+            // Process the results from getAllAudioBase64
+            for (const chunk of audioDataObjects) {
+                audioBuffers.push(Buffer.from(chunk.base64, 'base64'));
+            }
+            // ---------------------
+
+            // The delay is still important to prevent rate-limiting.
+            await sleep(500);
+        }
+
         const finalAudioBuffer = Buffer.concat(audioBuffers);
         console.log(`✅ [Audio] Audio generated successfully for language: ${targetLang}`);
         return finalAudioBuffer;
+
     } catch (err) {
         console.error('[Translation/TTS Error]', err);
-        return null; // Return null on error
+        return null;
     }
 }
 
-// Unified API: From Topic → Gemini → Audio
+// Unified API Endpoint (No changes)
 app.post('/podcast', async (req, res) => {
   const { topic, targetLanguage } = req.body;
 
-  // Validate input from the client
   if (!topic || !targetLanguage) {
     return res.status(400).json({ error: 'Missing "topic" or "targetLanguage" in the request body.' });
   }
 
   const explainedText = await explainWithGemini(topic);
 
-  // Validate that Gemini returned text
   if (!explainedText) {
     return res.status(500).json({ error: 'Failed to get an explanation from the AI model.' });
   }
 
   const audioBuffer = await translateAndSpeak(explainedText, targetLanguage);
 
-  // Validate that audio was generated
   if (!audioBuffer) {
     return res.status(500).json({ error: 'Failed to translate text or generate audio.' });
   }
   
-  // Success! Send the audio file back.
   res.setHeader('Content-Type', 'audio/mpeg');
   res.send(audioBuffer);
 });
