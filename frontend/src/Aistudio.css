@@ -169,10 +169,7 @@ body { margin: 0; background-color: var(--bg-dark); color: var(--text-primary); 
   word-wrap: break-word;
 }
 
-.skeleton-wrapper { width: 100%; }
-.skeleton-line { height: 1.2em; background: linear-gradient(90deg, var(--bg-light) 25%, #2a2b2d 50%, var(--bg-light) 75%); background-size: 200% 100%; border-radius: 4px; margin-bottom: 1rem; animation: shimmer 1.5s infinite linear; }
-@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
 
 /* --- RESPONSIVE DESIGN FOR SIDEBAR --- */
 @media (max-width: 768px) {
@@ -323,54 +320,7 @@ body { margin: 0; background-color: var(--bg-dark); color: var(--text-primary); 
     outline: none;
     border-color: #5a5a5a;
 }
-.loading-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background-color: rgba(0, 0, 0, 0.6);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  z-index: 1000;
-  backdrop-filter: blur(5px);
-  -webkit-backdrop-filter: blur(5px);
-}
 
-.loading-popup {
-  background: #ffffff;
-  padding: 2rem 3rem;
-  border-radius: 12px;
-  box-shadow: 0 5px 20px rgba(0, 0, 0, 0.2);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1.5rem;
-  max-width: 400px;
-  text-align: center;
-}
-
-.loading-spinner {
-  width: 48px;
-  height: 48px;
-  border: 5px solid #f3f3f3; /* Light grey */
-  border-top: 5px solid #3498db; /* Blue */
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-}
-
-.loading-message {
-  font-size: 1rem;
-  color: #333;
-  font-weight: 500;
-  margin: 0;
-}
-
-@keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
-}
 /* Add these styles to your Aistudio.css file */
 
 .synthesized-answer {
@@ -1065,7 +1015,7 @@ body { margin: 0; background-color: var(--bg-dark); color: var(--text-primary); 
     padding: 2rem;
 }
 
-.loading-spinner {
+/* .loading-spinner {
   width: 50px;
   height: 50px;
   border: 5px solid #f3f3f3;
@@ -1073,7 +1023,7 @@ body { margin: 0; background-color: var(--bg-dark); color: var(--text-primary); 
   border-radius: 50%;
   animation: spin 1s linear infinite;
   margin: 0 auto 1rem;
-}
+} */
 
 @keyframes spin {
   0% { transform: rotate(0deg); }
@@ -1124,7 +1074,7 @@ body { margin: 0; background-color: var(--bg-dark); color: var(--text-primary); 
 .quiz-option-label.selected {
     background-color: #dbeafe;
     border-color: #3b82f6;
-    color: red;
+    color: blue;
     font-weight: 500;
 }
 
@@ -1275,4 +1225,160 @@ body { margin: 0; background-color: var(--bg-dark); color: var(--text-primary); 
 .file-delete-button:hover {
   color: #fff;
   background-color: #444550;
+}
+/* === Experimental Thoughts Loader Styles === */
+.thoughts-loader-container {
+    background-color: #f8f9fa;
+    border: 1px solid #e0e0e0;
+    border-radius: 12px;
+    padding: 12px 16px;
+    margin-bottom: 1rem;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+.thoughts-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.thoughts-left-content {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.sparkle-icon svg {
+    animation: sparkle-pulse-effect 2.5s infinite ease-in-out;
+}
+
+.thoughts-title-text {
+    font-size: 1rem;
+    color: #202124;
+}
+
+.thoughts-title-text strong {
+    font-weight: 600;
+}
+
+.thoughts-title-text span {
+    color: #5f6368;
+    font-weight: 400;
+}
+
+.auto-pill {
+    background-color: #e9ecef;
+    color: #3c4043;
+    padding: 4px 14px;
+    border-radius: 16px;
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.thoughts-divider {
+    height: 1px;
+    background-color: #e9ecef;
+    margin: 12px 0;
+}
+.thinking-indicator {
+    height: 5px;
+    background-color: #e9ecef;
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 8px;
+}
+
+.thinking-bar {
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(
+        90deg,
+        rgba(255, 255, 255, 0) 0%,
+        rgba(155, 89, 182, 0.5) 50%,
+        rgba(255, 255, 255, 0) 100%
+    );
+    animation: shimmer-effect 1.8s infinite linear;
+}
+
+@keyframes sparkle-pulse-effect {
+    0%, 100% {
+        transform: scale(1) rotate(0deg);
+        opacity: 1;
+    }
+    50% {
+        transform: scale(1.15) rotate(10deg);
+        opacity: 0.85;
+    }
+}
+
+@keyframes shimmer-effect {
+    0% {
+        transform: translateX(-100%);
+    }
+    100% {
+        transform: translateX(100%);
+    }
+}
+/* Aistudio.css */
+
+/* --- STYLES FOR THE NEW SEARCH BAR LAYOUT --- */
+
+/* 1. Make the wrapper fill the available space in the search bar
+      and act as the positioning context for the toggle. */
+.search-input-wrapper {
+    flex: 1;
+    position: relative; /* This is crucial for absolute positioning inside */
+}
+
+/* 2. Ensure the input field takes up the full width of its new wrapper
+      and add padding at the bottom to make room for our new toggle button. */
+.search-bar .search-input-wrapper input {
+    width: 100%;
+    /* Add space at the bottom so typed text doesn't go under the button */
+    padding-bottom: 30px; 
+}
+
+/* 3. Style and position the new toggle button itself */
+.research-mode-toggle-bottom {
+    position: absolute; /* Position it relative to the wrapper */
+    bottom: 1px;       /* Place it 6px from the bottom */
+    left: 0px;        /* Place it 12px from the left */
+    /* Styling for the button appearance */
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    /* background-color: #f0f0f0; */
+    border-radius: 12px; /* Pill shape */
+    font-size: 12px;
+    font-weight: 500;
+    color: white;
+    cursor: pointer;
+    transition: all 0.2s ease-in-out;
+}
+
+/* Make the icon inside the toggle a bit smaller */
+.research-mode-toggle-bottom svg {
+    width: 14px;
+    height: 14px;
+}
+
+/* 4. Style for when the toggle is active */
+.research-mode-toggle-bottom.active { /* A nice blue color for active state */
+    color: rgb(220, 90, 90);
+}
+
+/* 5. Add a subtle hover effect */
+.research-mode-toggle-bottom:hover {
+    /* background-color: #e0e0e0; */
+}
+
+.research-mode-toggle-bottom.active:hover {
+    /* background-color: #2980b9;  */
+}
+
+/* --- Remove the old toggle style to avoid conflicts --- */
+.research-mode-toggle-inside {
+    /* You can safely delete the old CSS rule for this class */
+    display: none; 
 }
