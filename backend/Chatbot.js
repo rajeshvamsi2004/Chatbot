@@ -8,7 +8,6 @@ const multer = require('multer');
 // const PDFParser = require("pdf2json"); // <-- REMOVED: Unused dependency
 const storage = multer.memoryStorage();
 const upload = multer({ storage: multer.memoryStorage() });
-const pdfParse = require('pdf-parse');
 const Tesseract = require('tesseract.js');
 const path = require('path');
 const os = require('os');
