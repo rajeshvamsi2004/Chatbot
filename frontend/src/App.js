@@ -1,9 +1,9 @@
 import './App.css'
-import Aistudio from './Aistudio';
+import Chatbot from './Chatbot';
 const App = () => {
   return(
     <div className='app-container'>
-      <Aistudio/>
+      <Chatbot/>
     </div>
   )
 }
