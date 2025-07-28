@@ -1,422 +1,696 @@
+// --- 1. IMPORTS & SETUP ---
 const express = require('express');
 const mongoose = require('mongoose');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const cors = require('cors');
-require('dotenv').config();
-
 const multer = require('multer');
-const PDFParser = require("pdf2json"); 
+// const PDFParser = require("pdf2json"); // <-- REMOVED: Unused dependency
+const storage = multer.memoryStorage();
+const upload = multer({ storage: multer.memoryStorage() });
+const pdfParse = require('pdf-parse');
+const Tesseract = require('tesseract.js');
+const path = require('path');
+const os = require('os');
+const fs = require('fs');
+require('dotenv').config();
 
 const { JSDOM } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
-
-// ▼▼▼ 1. SELENIUM DEPENDENCIES ADDED ▼▼▼
 const { Builder, By, until } = require('selenium-webdriver');
 const chrome = require('selenium-webdriver/chrome');
-// Make sure you have run: npm install selenium-webdriver chromedriver
 
+// Local imports
 const History = require('./models/History.js');
+// const { findSimilarQuery, cacheQueryResult } = require('./vectorCache.js'); // <-- REMOVED
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-
 app.use(cors());
 app.use(express.json());
-
-const storage = multer.memoryStorage();
-const upload = multer({ storage: storage });
-
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// --- Job Search Function (UNCHANGED) ---
-async function searchJobs(jobQuery, location = 'USA', page = '1') {
-    const options = {
-        method: 'GET',
-        url: 'https://jsearch.p.rapidapi.com/search',
-        params: {
-            query: `${jobQuery} in ${location}`,
-            page: page,
-            num_pages: '1'
-        },
-        headers: {
-            'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
-            'X-RapidAPI-Host': 'jsearch.p.rapidapi.com'
+// --- 2. OPTIMIZED SCRAPING FUNCTIONS ---
+
+// Global driver pool for reusing browser instances
+let driverPool = [];
+const MAX_DRIVERS = 3;
+let driverPoolInitialized = false;
+
+// Initialize driver pool
+async function initializeDriverPool() {
+    console.log('🚀 Initializing driver pool...');
+    for (let i = 0; i < MAX_DRIVERS; i++) {
+        const options = new chrome.Options()
+            .addArguments(
+                '--headless',
+                '--disable-gpu',
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-extensions',
+                '--disable-images', // Skip image loading
+                '--disable-javascript', // Skip JS if not needed
+                '--disable-css', // Skip CSS if not needed
+                '--disable-plugins',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+                '--window-size=1920,1080',
+                '--log-level=3'
+            );
+        
+        const driver = await new Builder()
+            .forBrowser('chrome')
+            .setChromeOptions(options)
+            .build();
+            
+        await driver.manage().setTimeouts({
+            pageLoad: 15000,
+            script: 10000,
+            implicit: 5000
+        });
+        
+        driverPool.push(driver);
+    }
+}
+
+// Get available driver from pool
+async function getDriver() {
+    if (driverPool.length === 0) {
+        await initializeDriverPool();
+    }
+    return driverPool.pop();
+}
+
+// Return driver to pool
+function returnDriver(driver) {
+    driverPool.push(driver);
+}
+
+// Cleanup driver pool
+async function cleanupDriverPool() {
+    console.log('🧹 Cleaning up driver pool...');
+    for (const driver of driverPool) {
+        try {
+            await driver.quit();
+        } catch (err) {
+            console.error('Error closing driver:', err);
+        }
+    }
+    driverPool = [];
+}
+
+// OPTION 1: Hybrid approach - try requests first, fallback to Selenium
+async function crawlWithHybridApproach(links) {
+    if (!links || links.length === 0) return [];
+    
+    const results = [];
+    const failedLinks = [];
+    
+    // First pass: Try with requests + cheerio (much faster)
+    console.log('📡 Phase 1: Trying fast extraction with requests...');
+    const requestPromises = links.map(async (linkInfo) => {
+        const { link, title } = linkInfo;
+        try {
+            const response = await axios.get(link, {
+                timeout: 8000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                    'Accept-Encoding': 'gzip, deflate',
+                    'Connection': 'keep-alive',
+                }
+            });
+            
+            const dom = new JSDOM(response.data, { url: link });
+            const article = new Readability(dom.window.document).parse();
+            
+            if (article && article.textContent && article.textContent.trim().length > 200) {
+                const cleanText = article.textContent.trim().replace(/\s{2,}/g, ' ');
+                console.log(`✅ Fast extraction successful for: ${link}`);
+                return { status: 'success', title, link, textContent: cleanText.substring(0, 8000) };
+            } else {
+                failedLinks.push(linkInfo);
+                return { status: 'fail', link };
+            }
+        } catch (error) {
+            failedLinks.push(linkInfo);
+            return { status: 'fail', link };
+        }
+    });
+    
+    const requestResults = await Promise.all(requestPromises);
+    results.push(...requestResults.filter(r => r.status === 'success'));
+    
+    // Second pass: Use Selenium for failed links
+    if (failedLinks.length > 0 && results.length < 2) {
+        console.log(`🔄 Phase 2: Using Selenium for ${failedLinks.length} failed links...`);
+        const seleniumResults = await crawlWithSeleniumPool(failedLinks);
+        results.push(...seleniumResults);
+    }
+    
+    return results;
+}
+
+// OPTION 2: Optimized Selenium with driver pool
+async function crawlWithSeleniumPool(links) {
+    if (!links || links.length === 0) return [];
+    
+    const crawlSingleLink = async (linkInfo) => {
+        const { link, title } = linkInfo;
+        const driver = await getDriver();
+        
+        try {
+            console.log(`🔍 Selenium crawling: ${link}`);
+            await driver.get(link);
+            
+            // Wait for basic content to load
+            await driver.wait(until.elementLocated(By.tagName('body')), 10000);
+            
+            const pageSource = await driver.getPageSource();
+            const dom = new JSDOM(pageSource, { url: link });
+            const article = new Readability(dom.window.document).parse();
+            
+            if (article && article.textContent) {
+                const cleanText = article.textContent.trim().replace(/\s{2,}/g, ' ');
+                console.log(`✅ Selenium extraction successful for: ${link}`);
+                return { status: 'success', title, link, textContent: cleanText.substring(0, 8000) };
+            } else {
+                return { status: 'fail', link };
+            }
+        } catch (err) {
+            console.log(`❌ Selenium failed for ${link}: ${err.message.split('\n')[0]}`);
+            return { status: 'fail', link };
+        } finally {
+            returnDriver(driver);
         }
     };
-
-    try {
-        console.log(`[JOB SEARCH] Querying JSearch API for: "${jobQuery} in ${location}"`);
-        const response = await axios.request(options);
-        return response.data.data;
-    } catch (error) {
-        console.error("❌ JSearch API Error:", error.message);
-        return null;
+    
+    // Limit concurrent Selenium operations
+    const batchSize = Math.min(links.length, MAX_DRIVERS);
+    const results = [];
+    
+    for (let i = 0; i < links.length; i += batchSize) {
+        const batch = links.slice(i, i + batchSize);
+        const batchPromises = batch.map(linkInfo => crawlSingleLink(linkInfo));
+        const batchResults = await Promise.all(batchPromises);
+        results.push(...batchResults.filter(r => r.status === 'success'));
     }
+    
+    return results;
 }
 
-// --- New Job Search Endpoint (UNCHANGED) ---
-app.get('/jobs', async (req, res) => {
-    const { query, location } = req.body;
-
-    if (!query) {
-        return res.status(400).json({ error: 'Job "query" is required.' });
-    }
-
-    const jobs = await searchJobs(query, location);
-
-    if (jobs) {
-        res.status(200).json(jobs);
-    } else {
-        res.status(500).json({ error: 'Failed to fetch job listings.' });
-    }
-});
-
-
-// --- Sanitize query (UNCHANGED) ---
-function sanitizeQuery(query) {
-    const instructionalWords = ['explain about', 'explain', 'what is', 'what are', 'who is', 'who are', 'tell me about', 'give me information on', 'define', 'definition of'];
-    let sanitized = query.toLowerCase().trim();
-    for (const word of instructionalWords) {
-        if (sanitized.startsWith(word + ' ')) {
-            sanitized = sanitized.substring(word.length).trim();
-            break;
+// OPTION 3: Pure requests approach (fastest)
+async function crawlWithRequestsOnly(links) {
+    if (!links || links.length === 0) return [];
+    
+    console.log('⚡ Using pure requests approach for maximum speed...');
+    
+    const crawlSingleLink = async (linkInfo) => {
+        const { link, title } = linkInfo;
+        
+        try {
+            const response = await axios.get(link, {
+                timeout: 10000,
+                maxRedirects: 3,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                    'Connection': 'keep-alive',
+                }
+            });
+            
+            // Try multiple extraction methods
+            const dom = new JSDOM(response.data, { url: link });
+            let article = new Readability(dom.window.document).parse();
+            
+            if (!article || !article.textContent || article.textContent.trim().length < 200) {
+                // Fallback: manual content extraction
+                const $ = cheerio.load(response.data);
+                
+                // Remove unwanted elements
+                $('script, style, nav, header, footer, aside, .advertisement, .ads, .social-share').remove();
+                
+                // Try common content selectors
+                const contentSelectors = [
+                    'article', '[role="main"]', '.content', '.post-content', 
+                    '.entry-content', '.article-content', 'main', '.container p'
+                ];
+                
+                let extractedText = '';
+                for (const selector of contentSelectors) {
+                    const content = $(selector).text().trim();
+                    if (content.length > extractedText.length) {
+                        extractedText = content;
+                    }
+                }
+                
+                if (extractedText.length > 200) {
+                    article = { textContent: extractedText };
+                }
+            }
+            
+            if (article && article.textContent && article.textContent.trim().length > 200) {
+                const cleanText = article.textContent.trim().replace(/\s{2,}/g, ' ');
+                console.log(`✅ Requests extraction successful for: ${link}`);
+                return { status: 'success', title, link, textContent: cleanText.substring(0, 8000) };
+            } else {
+                console.log(`⚠️ Insufficient content for: ${link}`);
+                return { status: 'fail', link };
+            }
+            
+        } catch (error) {
+            console.log(`❌ Requests failed for ${link}: ${error.message}`);
+            return { status: 'fail', link };
         }
-    }
-    return sanitized.charAt(0).toUpperCase() + sanitized.slice(1);
+    };
+    
+    const crawlPromises = links.map(linkInfo => crawlSingleLink(linkInfo));
+    const results = await Promise.all(crawlPromises);
+    
+    return results.filter(r => r.status === 'success');
 }
 
-
-const { URL } = require('url');
-
-// --- DuckDuckGo Search Functions (UNCHANGED) ---
-function decodeDuckDuckGoUrl(href) {
-    try {
-        const urlObj = new URL('https://duckduckgo.com' + href);
-        const realUrl = decodeURIComponent(urlObj.searchParams.get('uddg'));
-        return realUrl;
-    } catch (e) {
-        return null;
-    }
-}
-
-async function duckDuckGoSearch(query) {
+// Enhanced DuckDuckGo search with better filtering
+async function enhancedDuckDuckGoSearch(query) {
     const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    
     try {
-        const { data } = await axios.get(searchUrl, {
-            headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
-
+        const headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Connection': 'keep-alive',
+        };
+        
+        const { data } = await axios.get(searchUrl, { headers, timeout: 10000 });
         const $ = cheerio.load(data);
         const results = [];
-
+        const { URL } = require('url');
+        
         $('a.result__a').each((i, el) => {
-            const title = $(el).text();
+            const title = $(el).text().trim();
             const rawLink = $(el).attr('href');
-            const realLink = decodeDuckDuckGoUrl(rawLink);
-            const snippet = $(el).closest('.result').find('.result__snippet').text().trim();
-            if (realLink) {
-                results.push({ title, link: realLink, snippet });
+            
+            try {
+                const urlObj = new URL('https://duckduckgo.com' + rawLink);
+                const realUrl = decodeURIComponent(urlObj.searchParams.get('uddg'));
+                const snippet = $(el).closest('.result').find('.result__snippet').text().trim();
+                
+                if (realUrl && title && !isLowQualityDomain(realUrl)) {
+                    results.push({ title, link: realUrl, snippet });
+                }
+            } catch (e) {
+                // Ignore invalid links
             }
         });
-
+        
         return results;
     } catch (error) {
-        console.error('❌ DuckDuckGo scrape failed:', error.message);
+        console.error('❌ Enhanced DuckDuckGo scrape failed:', error.message);
         return [];
     }
 }
 
-
-// ▼▼▼ 2. NEW SELENIUM CRAWLER FUNCTION ▼▼▼
-// This function replaces the old axios-based crawlAndExtract function.
-// It uses a headless Chrome browser to load pages, execute JavaScript,
-// and then extracts the main article content.
-async function crawlAndExtractWithSelenium(url, title) {
-    console.log(`\t[SELENIUM CRAWL] Attempting to crawl: ${url}`);
-    let driver;
-
-    try {
-        const options = new chrome.Options();
-        options.addArguments('--headless'); // Run in the background
-        options.addArguments('--disable-gpu');
-        options.addArguments('--no-sandbox');
-        options.addArguments('--disable-dev-shm-usage');
-        options.addArguments('--log-level=3'); // Suppress console logs from chrome
-        options.addArguments("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
-
-        driver = await new Builder()
-            .forBrowser('chrome')
-            .setChromeOptions(options)
-            .build();
-
-        // Navigate to the page with a timeout
-        await driver.get(url);
-        
-        // Wait for the body of the page to be loaded, max 15 seconds
-        await driver.wait(until.elementLocated(By.tagName('body')), 15000);
-
-        // Get the full page source after JavaScript has executed
-        const pageSource = await driver.getPageSource();
-
-        // Use Readability.js to parse the article content from the HTML
-        const dom = new JSDOM(pageSource, { url });
-        const reader = new Readability(dom.window.document);
-        const article = reader.parse();
-
-        if (article && article.textContent) {
-            console.log(`\t[SELENIUM CRAWL] ✅ SUCCESS for: ${url}`);
-            return {
-                title,
-                textContent: article.textContent.trim().substring(0, 8000)
-            };
-        } else {
-            console.log(`\t[SELENIUM CRAWL] ⚠️ No readable content for: ${url}`);
-            return null;
-        }
-
-    } catch (err) {
-        console.log(`\t[SELENIUM CRAWL] ❌ ERROR: ${url} | ${err.message}`);
-        return null;
-    } finally {
-        if (driver) {
-            await driver.quit(); // Always close the browser session
-        }
-    }
+// Filter out low-quality domains
+function isLowQualityDomain(url) {
+    const lowQualityDomains = [
+        'pinterest.com', 'instagram.com', 'twitter.com', 'facebook.com',
+        'youtube.com', 'tiktok.com', 'reddit.com', 'quora.com'
+    ];
+    
+    return lowQualityDomains.some(domain => url.includes(domain));
 }
 
-// NOTE: The old `crawlAndExtract` function has been removed as it's now replaced by the Selenium version.
+// --- 3. HELPER & UTILITY FUNCTIONS ---
+function sanitizeQuery(query) {
+    const instructionalWords = ['explain about', 'explain', 'what is', 'what are', 'who is', 'who are', 'tell me about', 'give me information on', 'define', 'definition of'];
+    let sanitized = query.toLowerCase().trim();
+    for (const word of instructionalWords) { 
+        if (sanitized.startsWith(word + ' ')) { 
+            sanitized = sanitized.substring(word.length).trim(); 
+            break; 
+        } 
+    }
+    return sanitized.charAt(0).toUpperCase() + sanitized.slice(1);
+}
 
-// --- Main API Endpoint (MODIFIED TO USE SELENIUM) ---
+// --- 4. OPTIMIZED API ROUTES ---
 app.post('/api', async (req, res) => {
     const { query } = req.body;
-    if (!query) {
-        return res.status(400).json({ error: 'Query is required.' });
+    if (!query) { 
+        return res.status(400).json({ error: 'Query is required.' }); 
     }
 
-    const searchQuery = sanitizeQuery(query);
-    console.log(`Original: "${query}" | Search: "${searchQuery}"`);
+    const startTime = Date.now();
+    console.log(`\n--- [OPTIMIZED PIPELINE START] ---`);
+    console.log(`[PIPELINE] Received query: "${query}"`);
 
     try {
-        console.log(`[1/5] Scraping DuckDuckGo for: ${searchQuery}`);
-        const searchResults = await duckDuckGoSearch(searchQuery);
+        // // Check cache first <-- REMOVED
+        // const cachedResult = await findSimilarQuery(query);
+        // if (cachedResult) {
+        //     console.log(`[PIPELINE] ✅ Cache hit! Returning cached result.`);
+        //     return res.json({ ...cachedResult, fromCache: true });
+        // }
 
-        if (searchResults.length === 0) {
-            return res.json({
-                summary: "No relevant sources were found online for your query.",
-                key_points: [],
-                sources: [],
-                all_search_results: []
+        console.log(`[PIPELINE] Step 1: Searching DuckDuckGo...`); // Step number updated
+        const searchQuery = sanitizeQuery(query);
+        
+        // Use enhanced search
+        const searchResults = await enhancedDuckDuckGoSearch(searchQuery);
+
+        if (!searchResults || searchResults.length === 0) {
+            console.log(`[PIPELINE] ⚠️ No sources found on DuckDuckGo for query: "${searchQuery}"`);
+            return res.json({ 
+                summary: "I couldn't find any relevant sources online to answer your question. Please try a different query.", 
+                key_points: [], 
+                sources: [], 
+                all_search_results: [] 
+            });
+        }
+        
+        // Get unique links and select top results
+        const uniqueLinks = Array.from(new Map(searchResults.map(item => [item.link, item])).values());
+        const linksToAnalyze = uniqueLinks.slice(0, 5); // Increased to 5 for better content
+        console.log(`[PIPELINE] Found ${searchResults.length} results. Crawling top ${linksToAnalyze.length}...`);
+        
+        // Initialize driver pool if needed (lazy initialization)
+        if (!driverPoolInitialized) {
+            await initializeDriverPool();
+            driverPoolInitialized = true;
+        }
+        
+        // Choose crawling strategy based on your needs:
+        
+        // OPTION 1: Fastest - Pure requests (recommended for speed)
+        const extracted = await crawlWithRequestsOnly(linksToAnalyze);
+        
+        // OPTION 2: Balanced - Hybrid approach (uncomment to use)
+        // const extracted = await crawlWithHybridApproach(linksToAnalyze);
+        
+        // OPTION 3: Most reliable but slower - Selenium only
+        // const extracted = await crawlWithSeleniumPool(linksToAnalyze);
+
+        if (extracted.length === 0) {
+            console.log(`[PIPELINE] ⚠️ No content could be extracted from any source.`);
+            return res.status(500).json({ 
+                error: "I found sources, but was unable to read their content. This can happen with complex websites or network issues." 
             });
         }
 
-        const uniqueLinks = new Map();
-        searchResults.forEach(result => {
-            if (result.link && !uniqueLinks.has(result.link)) {
-                uniqueLinks.set(result.link, result);
-            }
-        });
-
-        const uniqueSources = Array.from(uniqueLinks.values());
-        const linksToAnalyze = uniqueSources.slice(0, 5); // Using 5 links to balance performance and depth
-
-        console.log(`[2/5] Crawling top ${linksToAnalyze.length} sources with Selenium...`);
+        console.log(`[PIPELINE] Step 2: Successfully extracted content from ${extracted.length} sources. Generating AI analysis...`); // Step number updated
         
-        // ▼▼▼ 3. CALLING THE NEW SELENIUM FUNCTION ▼▼▼
-        const crawlPromises = linksToAnalyze.map(item => crawlAndExtractWithSelenium(item.link, item.title));
-        const crawledSettled = await Promise.allSettled(crawlPromises);
-
-        const extracted = [];
-        crawledSettled.forEach((result, index) => {
-            const originalSource = linksToAnalyze[index];
-            if (result.status === 'fulfilled' && result.value && result.value.textContent) {
-                extracted.push(result.value);
-            } else {
-                console.log(`\t[CRAWL] ⚠️ Fallback to snippet for: ${originalSource.link}`);
-                if (originalSource.snippet) { 
-                    extracted.push({
-                        title: originalSource.title,
-                        textContent: originalSource.snippet
-                    });
-                }
-            }
-        });
-
-        if (extracted.length === 0) {
-            return res.status(500).json({ error: "Could not read content from any of the top sources. Please try again." });
-        }
-
-        console.log(`[3/5] Extracted content from ${extracted.length} sources.`);
-
-        const combinedText = extracted.map((c, i) =>
+        // Create combined text for AI analysis
+        const combinedText = extracted.map((c, i) => 
             `--- Source ${i + 1}: ${c.title} ---\n${c.textContent}\n\n`
         ).join('');
         
-        const prompt = `
-You are an expert research analyst. Your task is to provide a comprehensive and detailed answer to the user's query based *only* on the provided text from the following web sources.
+        // Enhanced prompt with better instructions
+        const prompt = `You are an expert research analyst. Your task is to synthesize information to answer the user's query based ONLY on the provided web sources.
 
-User Query: "${query}"
+USER'S QUERY: "${query}"
 
-Sources:
-${combinedText}
+Analyze the following sources and generate a response in a single, valid JSON object format. The JSON object MUST have this exact structure:
 
-Please synthesize the information from the sources into a valid JSON object with the following structure:
 {
-  "summary": "A detailed, multi-paragraph summary that thoroughly answers the user's query. Be comprehensive and draw connections between the sources.",
-  "key_points": ["A list of the most crucial points or takeaways, each as a string.", "Ensure these are distinct and important.", "Aim for 3-5 key points."],
-  "sources_used": [An array of numbers corresponding to the source(s) you used for the information, for example, [1, 3, 4]],
-  "follow_up_questions": ["An array of 3-4 interesting and relevant follow-up questions a user might ask after reading the summary. Each question should be a concise string."]
+    "summary": "A comprehensive summary that directly answers the user's query. Make it informative and well-structured.",
+    "key_points": ["An array of 4-6 crucial bullet points that highlight the most important information"],
+    "sources_used": [1, 2, 3],
+    "follow_up_questions": ["An array of 3 insightful follow-up questions related to the topic"]
 }
 
-Do not include any information not present in the provided sources. Your response must be only the JSON object, without any markdown or explanatory text.
-        `;
+IMPORTANT RULES:
+- You MUST include all keys in the JSON response
+- If you cannot generate content for a key, return an empty array [] for arrays or empty string "" for strings
+- Your entire response must be ONLY the JSON object - no additional text
+- Base your answer ONLY on the provided sources
+- Make the summary comprehensive but concise
+- Ensure key_points are actionable and informative
+- sources_used should reference the source numbers (1-based indexing)
 
-        const model = genAI.getGenerativeModel({
-            model: "gemini-1.5-flash-latest",
-            generationConfig: {
+--- SOURCES ---
+${combinedText}
+--- END SOURCES ---`;
+
+        const model = genAI.getGenerativeModel({ 
+            model: "gemini-1.5-flash-latest", 
+            generationConfig: { 
                 response_mime_type: "application/json",
-            },
+                temperature: 0.3 // Lower temperature for more consistent JSON
+            } 
         });
         
-        console.log('[4/5] Generating analysis with Gemini...');
         const result = await model.generateContent(prompt);
-        const response = result.response;
-        const text = response.text();
+        const text = result.response.text();
+        
         let parsed;
         try {
             parsed = JSON.parse(text);
         } catch (err) {
-            console.error("❌ Failed to parse Gemini response:", text);
-            return res.status(500).json({ error: "The AI returned an invalid response. Please try rephrasing your query." });
+            console.error("❌ AI returned invalid JSON. Raw response:", text.substring(0, 500) + "...");
+            return res.status(500).json({ 
+                error: "The AI analyst returned an invalidly formatted response. This may be a temporary issue." 
+            });
         }
-
-        const sourcesUsed = parsed.sources_used
-            ? parsed.sources_used
-                .map(num => extracted[num - 1] ? linksToAnalyze[num - 1] : null)
-                .filter(Boolean)
-            : [];
-
-        console.log('[5/5] Successfully generated response.');
-        res.json({
-            summary: parsed.summary,
-            key_points: parsed.key_points,
-            sources: sourcesUsed,
+        
+        // Map sources used to actual source objects
+        const sourcesUsed = parsed.sources_used ? 
+            parsed.sources_used.map(num => extracted[num - 1] || null).filter(Boolean) : [];
+        
+        const finalResponse = {
+            summary: parsed.summary || "The AI did not provide a summary.",
+            key_points: parsed.key_points || [],
+            sources: sourcesUsed.map(s => ({ title: s.title, link: s.link })),
             follow_up_questions: parsed.follow_up_questions || [],
-            all_search_results: uniqueSources
+            all_search_results: uniqueLinks
+        };
+
+        const endTime = Date.now();
+        const executionTime = (endTime - startTime) / 1000;
+        console.log(`[PIPELINE] ✅ Optimized pipeline finished in ${executionTime}s (${extracted.length} sources processed).`);
+        
+        res.json(finalResponse);
+
+        // Background operations (don't await these)
+        setImmediate(async () => {
+            try {
+                const newHistory = new History({ query });
+                await newHistory.save();
+                // await cacheQueryResult(query, finalResponse); // <-- REMOVED
+            } catch (dbError) {
+                console.error("Error during background DB ops:", dbError);
+            }
         });
 
     } catch (err) {
-        console.error("❌ Pipeline Error:", err.message);
-        res.status(500).json({ error: "An unexpected error occurred during the analysis process." });
+        console.error("❌ [PIPELINE] A critical error occurred:", err);
+        if (!res.headersSent) {
+            res.status(500).json({ 
+                error: "An unexpected internal error occurred." 
+            });
+        }
     }
 });
 
-
-// --- File Analysis Endpoint (UNCHANGED) ---
-app.post('/api/analyze-file', upload.single('file'), async (req, res) => {
-    if (!req.file) {
-      return res.status(400).json({ error: "No file was uploaded." });
-    }
-  
+// Test route to verify optimization
+app.get('/api/test', async (req, res) => {
     try {
-        console.log(`[FILE] Received file: ${req.file.originalname} | Size: ${req.file.size} bytes`);
-        let extractedText = '';
+        const testResults = await enhancedDuckDuckGoSearch('JavaScript tutorials');
+        res.json({ 
+            message: 'Optimization working!', 
+            results: testResults.length,
+            sample: testResults[0] || null
+        });
+    } catch (error) {
+        res.json({ error: error.message });
+    }
+});
+
+// --- 5. ALL OTHER ROUTES (UNCHANGED) ---
+app.post('/api/analyze-file', upload.single('file'), async (req, res) => {
+    console.log('\n[FILE ANALYSIS] Request received.');
+    if (!req.file) {
+        console.log('[FILE ANALYSIS] ❌ Error: No file was uploaded.');
+        return res.status(400).json({ error: "No file was uploaded." });
+    }
+
+    try {
         const file = req.file;
-  
-        if (file.mimetype === 'application/pdf' || file.originalname.toLowerCase().endsWith('.pdf')) {
-            console.log('[FILE] Parsing PDF with pdf2json...');
-            
-            const parsePdf = new Promise((resolve, reject) => {
-                const pdfParser = new PDFParser(this, 1);
+        console.log(`[FILE ANALYSIS] Received: ${file.originalname} (${file.mimetype})`);
 
-                pdfParser.on("pdfParser_dataError", errData => {
-                    console.error("pdf2json Error:", errData.parserError);
-                    reject(new Error("Failed to parse PDF. It might be corrupted or in an unsupported format."));
-                });
+        let extractedText = '';
 
-                pdfParser.on("pdfParser_dataReady", () => {
-                    const textContent = pdfParser.getRawTextContent();
-                    console.log('[FILE] pdf2json parsing complete.');
-                    resolve(textContent);
-                });
-
-                pdfParser.parseBuffer(file.buffer);
-            });
-            
-            extractedText = await parsePdf;
-
-        } else if (file.mimetype === 'text/plain' || file.originalname.toLowerCase().endsWith('.txt')) {
-            console.log('[FILE] Reading text file...');
+        if (file.mimetype === 'text/plain' || file.originalname.toLowerCase().endsWith('.txt')) {
             extractedText = file.buffer.toString('utf-8');
-        } else {
+        }
+        else if (file.mimetype === 'application/pdf' || file.originalname.toLowerCase().endsWith('.pdf')) {
+            console.log('[FILE ANALYSIS] 📄 Attempting text extraction using pdf-parse...');
+            const data = await pdfParse(file.buffer);
+            extractedText = data.text;
+
+            if (!extractedText || extractedText.trim().length < 10) {
+                console.log('[FILE ANALYSIS] ⚠️ Text-based extraction failed. Using OCR...');
+                const tempPath = path.join(os.tmpdir(), `${Date.now()}-${file.originalname}`);
+                fs.writeFileSync(tempPath, file.buffer);
+                const converter = fromPath(tempPath, { density: 150, saveFilename: 'ocr_temp', savePath: os.tmpdir(), format: 'png', width: 1200 });
+                const imageResult = await converter(1);
+                const ocrResult = await Tesseract.recognize(imageResult.path, 'eng');
+                extractedText = ocrResult.data.text;
+                fs.unlinkSync(tempPath);
+                fs.unlinkSync(imageResult.path);
+            }
+        }
+        else {
             return res.status(400).json({ error: "Unsupported file type. Please upload a .txt or .pdf file." });
         }
-  
+
         if (!extractedText || !extractedText.trim()) {
-            return res.status(400).json({ error: "Could not extract any text from the file. It might be empty or an image-based PDF." });
+            return res.status(400).json({ error: "Could not extract any text from the file. It might be empty or image-based and failed OCR." });
         }
 
-        console.log(`[FILE] Extracted ${extractedText.length} characters. Generating summary...`);
-      
-        const prompt = `
-        Analyze the following document and provide a concise summary and a list of key takeaways.
-        
-        Document Content:
-        ---
-        ${extractedText.substring(0, 15000)} 
-        ---
-  
-        Format your response strictly as a JSON object with two keys: "summary" and "key_points" (which must be an array of strings).
-        Do not include any other text or markdown formatting outside of the JSON object.
-        Example:
-        {
-            "summary": "A brief overview of the document's main points.",
-            "key_points": [
-                "First important takeaway.",
-                "Second important takeaway."
-            ]
-        }
-      `;
-  
-      const model = genAI.getGenerativeModel({
-        model: "gemini-1.5-flash-latest",
-        generationConfig: {
-            response_mime_type: "application/json",
-        },
-    });
+        console.log(`[FILE ANALYSIS] ✅ Extracted ${extractedText.length} characters.`);
 
-      const result = await model.generateContent(prompt);
-      const responseText = result.response.text();
-      let analysisData = JSON.parse(responseText);
-      
-      const finalResponse = {
-          ...analysisData,
-          sources: [],
-          all_search_results: [],
-          follow_up_questions: []
-      };
-  
-      console.log('[FILE] Successfully generated file analysis.');
-      res.json(finalResponse);
-  
+        const prompt = `Analyze the following document and provide key points:\n\n${extractedText}`;
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest", generationConfig: { response_mime_type: "application/json" } });
+        const result = await model.generateContent(prompt);
+        const responseText = result.response.text();
+        const analysisData = JSON.parse(responseText);
+
+        res.json({
+            ...analysisData,
+            sources: [],
+            all_search_results: [],
+            follow_up_questions: []
+        });
+
     } catch (error) {
-      console.error("❌ Error during file analysis:", error);
-      const errorMessage = error.message || "An internal server error occurred during file analysis.";
-      res.status(500).json({ error: errorMessage });
+        console.error("❌ Error during file analysis:", error);
+        res.status(500).json({ error: error.message || "An internal server error occurred during file analysis." });
     }
-  });
+});
 
+app.get('/api/history', async (req, res) => {
+    try {
+        const history = await History.find({}).sort({ createdAt: -1 });
+        res.status(200).json(history);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch history' });
+    }
+});
 
-// --- History Routes (UNCHANGED) ---
-app.post('/api/history', async (req, res) => { try { const { query } = req.body; if (!query) return res.status(400).json({ msg: 'Query is required.' }); const saved = await new History({ query }).save(); res.status(201).json(saved); } catch (error) { res.status(500).json({ msg: 'Failed to save history.' }); } });
-app.get('/api/history', async (req, res) => { try { const all = await History.find().sort({ createdAt: -1 }); res.status(200).json(all); } catch (error) { res.status(500).json({ msg: 'Error fetching history.' }); } });
-app.delete('/api/history/:id', async (req, res) => { try { const deleted = await History.findByIdAndDelete(req.params.id); if (!deleted) return res.status(404).json({ message: 'Not found' }); res.status(200).json({ message: 'Deleted successfully' }); } catch (error) { res.status(500).json({ message: 'Error deleting item' }); } });
-app.put('/api/history/:id', async (req, res) => { try { const { query } = req.body; const updated = await History.findByIdAndUpdate(req.params.id, { query }, { new: true }); if (!updated) return res.status(404).json({ message: 'Item not found' }); res.status(200).json(updated); } catch (error) { res.status(500).json({ message: 'Error updating item' }); } });
+app.post('/api/history', async (req, res) => {
+    try {
+        const { query } = req.body;
+        if (!query) return res.status(400).json({ error: 'Query is required' });
+        const newHistory = new History({ query });
+        await newHistory.save();
+        res.status(201).json(newHistory);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to save history' });
+    }
+});
 
-// --- MongoDB Connection & Server Start (UNCHANGED) ---
+app.delete('/api/history/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        await History.findByIdAndDelete(id);
+        res.status(200).json({ message: 'History item deleted' });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to delete history item' });
+    }
+});
+
+app.put('/api/history/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { query } = req.body;
+        if (!query) return res.status(400).json({ error: 'New query text is required' });
+        await History.findByIdAndUpdate(id, { query });
+        res.status(200).json({ message: 'History item updated' });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to update history item' });
+    }
+});
+
+const coreApiKey = process.env.CORE_API_KEY;
+if (!coreApiKey) {
+  console.error('Error: CORE_API_KEY is not defined in the .env file. Please add it and restart the server.');
+  process.exit(1);
+}
+
+async function searchOpenAlex(query) {
+  const userEmail = 'r87921749@gmail.com';
+  const url = `https://api.openalex.org/works?search=${encodeURIComponent(query)}&mailto=${userEmail}`;
+  try {
+    const response = await axios.get(url);
+    return response.data;
+  } catch (error) {
+    console.error('Error fetching from OpenAlex:', error.message);
+    throw new Error('Failed to fetch data from OpenAlex.');
+  }
+}
+
+async function searchCore(query) {
+  const url = `https://api.core.ac.uk/v3/search/works`;
+  try {
+    const response = await axios.post(url, { q: query }, {
+      headers: { 'Authorization': `Bearer ${coreApiKey}` }
+    });
+    return response.data;
+  } catch (error) {
+    console.error('Error fetching from CORE:', error.response ? error.response.data : error.message);
+    throw new Error('Failed to fetch data from CORE.');
+  }
+}
+
+app.get('/', (req, res) => {
+  console.log("Root route was hit!");
+  res.send('Welcome to the Scholarly Search API!');
+});
+
+app.get('/search', async (req, res) => {
+  console.log("Search route was hit!");
+  const { query } = req.query;
+  if (!query) {
+    return res.status(400).json({ error: 'A search query is required.' });
+  }
+  try {
+    const [openAlexResults, coreResults] = await Promise.all([
+      searchOpenAlex(query),
+      searchCore(query)
+    ]);
+    res.json({
+      message: 'Search successful',
+      data: {
+        openAlex: openAlexResults.results.map(work => ({ title: work.title, doi: work.doi })),
+        core: coreResults.results.map(work => ({ title: work.title, year: work.yearPublished }))
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'An error occurred while searching.' });
+  }
+});
+
+// --- 6. DATABASE & SERVER INITIALIZATION ---
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('✅ MongoDB connected'))
     .catch(err => console.error('❌ MongoDB connection error:', err));
 
+// Add graceful shutdown handling
+process.on('SIGINT', async () => {
+    console.log('\n🛑 Received SIGINT. Gracefully shutting down...');
+    await cleanupDriverPool();
+    process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+    console.log('\n🛑 Received SIGTERM. Gracefully shutting down...');
+    await cleanupDriverPool();
+    process.exit(0);
+});
+    
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
