@@ -1,19 +1,18 @@
-// --- 1. IMPORTS & SETUP ---
 const express = require('express');
 const mongoose = require('mongoose');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const cors = require('cors');
 const multer = require('multer');
-// const PDFParser = require("pdf2json"); // <-- REMOVED: Unused dependency
-const storage = multer.memoryStorage();
-const upload = multer({ storage: multer.memoryStorage() });
-const Tesseract = require('tesseract.js');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 require('dotenv').config();
 
+// PDF parsing
+const pdfParse = require('pdf-parse');
+
+const { URL } = require('url');
 const { JSDOM } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
@@ -22,72 +21,222 @@ const chrome = require('selenium-webdriver/chrome');
 
 // Local imports
 const History = require('./models/History.js');
-// const { findSimilarQuery, cacheQueryResult } = require('./vectorCache.js'); // <-- REMOVED
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-app.use(cors());
-app.use(express.json());
+
+// Enhanced CORS configuration for production
+app.use(cors({
+    origin: process.env.NODE_ENV === 'production' 
+        ? ['https://your-frontend-domain.com'] // Replace with actual frontend URL
+        : ['http://localhost:3000', 'http://localhost:5173'],
+    credentials: true
+}));
+
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const upload = multer({ 
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+});
 
-// --- 2. OPTIMIZED SCRAPING FUNCTIONS ---
+// --- ENHANCED RATE LIMITING AND ERROR HANDLING ---
+class RateLimiter {
+    constructor(limit = 15, window = 60000) {
+        this.limit = limit;
+        this.window = window;
+        this.requests = [];
+    }
 
-// Global driver pool for reusing browser instances
+    checkLimit() {
+        const now = Date.now();
+        this.requests = this.requests.filter(time => now - time < this.window);
+        
+        if (this.requests.length >= this.limit) {
+            const oldestRequest = Math.min(...this.requests);
+            const waitTime = this.window - (now - oldestRequest);
+            throw new Error(`Rate limit exceeded. Try again in ${Math.ceil(waitTime / 1000)} seconds.`);
+        }
+        
+        this.requests.push(now);
+    }
+}
+
+const rateLimiter = new RateLimiter(15, 60000); // 15 requests per minute
+
+// Circuit breaker for Gemini API
+class CircuitBreaker {
+    constructor(threshold = 3, timeout = 30000) {
+        this.failureCount = 0;
+        this.threshold = threshold;
+        this.timeout = timeout;
+        this.state = 'CLOSED'; // CLOSED, OPEN, HALF_OPEN
+        this.nextAttempt = Date.now();
+    }
+
+    async call(fn) {
+        if (this.state === 'OPEN') {
+            if (Date.now() < this.nextAttempt) {
+                throw new Error('Service temporarily unavailable. Please try again later.');
+            }
+            this.state = 'HALF_OPEN';
+        }
+
+        try {
+            const result = await fn();
+            this.onSuccess();
+            return result;
+        } catch (error) {
+            this.onFailure();
+            throw error;
+        }
+    }
+
+    onSuccess() {
+        this.failureCount = 0;
+        this.state = 'CLOSED';
+    }
+
+    onFailure() {
+        this.failureCount++;
+        if (this.failureCount >= this.threshold) {
+            this.state = 'OPEN';
+            this.nextAttempt = Date.now() + this.timeout;
+        }
+    }
+}
+
+const geminiCircuitBreaker = new CircuitBreaker(3, 30000);
+
+// --- ENHANCED GEMINI API CALLS WITH FALLBACK ---
+async function makeGeminiRequest(prompt, isFileAnalysis = false, retries = 3) {
+    const models = [
+        { name: "gemini-1.5-flash-8b", maxTokens: 2048, temperature: 0.3 },
+        { name: "gemini-1.5-flash", maxTokens: 2048, temperature: 0.3 },
+        { name: "gemini-1.5-pro", maxTokens: 2048, temperature: 0.4 }
+    ];
+
+    for (let modelIndex = 0; modelIndex < models.length; modelIndex++) {
+        const modelConfig = models[modelIndex];
+        
+        for (let attempt = 1; attempt <= retries; attempt++) {
+            try {
+                return await geminiCircuitBreaker.call(async () => {
+                    rateLimiter.checkLimit();
+                    
+                    const maxPromptLength = isFileAnalysis ? 20000 : 25000;
+                    const truncatedPrompt = prompt.length > maxPromptLength 
+                        ? prompt.substring(0, maxPromptLength) + "\n\n[Content truncated due to length limits]"
+                        : prompt;
+                    
+                    console.log(`[GEMINI] Trying ${modelConfig.name} (attempt ${attempt}/${retries})`);
+                    
+                    const model = genAI.getGenerativeModel({ 
+                        model: modelConfig.name,
+                        generationConfig: { 
+                            response_mime_type: "application/json",
+                            temperature: modelConfig.temperature,
+                            maxOutputTokens: modelConfig.maxTokens
+                        } 
+                    });
+                    
+                    const result = await model.generateContent(truncatedPrompt);
+                    const response = result.response.text();
+                    
+                    console.log(`[GEMINI] ✅ Success with ${modelConfig.name}`);
+                    return response;
+                });
+                
+            } catch (error) {
+                console.error(`[GEMINI] ${modelConfig.name} attempt ${attempt} failed:`, error.message);
+                
+                // If it's a rate limit error, don't try other models
+                if (error.message.includes('Rate limit')) {
+                    throw error;
+                }
+                
+                // If it's the last attempt with this model, try next model
+                if (attempt === retries) {
+                    console.log(`[GEMINI] Moving to next model after ${retries} failed attempts`);
+                    break;
+                }
+                
+                // Exponential backoff for retries
+                const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    }
+    
+    throw new Error('All Gemini models are currently unavailable');
+}
+
+// --- OPTIMIZED SCRAPING FUNCTIONS ---
 let driverPool = [];
 const MAX_DRIVERS = 3;
 let driverPoolInitialized = false;
 
-// Initialize driver pool
 async function initializeDriverPool() {
     console.log('🚀 Initializing driver pool...');
+    
     for (let i = 0; i < MAX_DRIVERS; i++) {
-        const options = new chrome.Options()
-            .addArguments(
-                '--headless',
-                '--disable-gpu',
-                '--no-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-extensions',
-                '--disable-images', // Skip image loading
-                '--disable-javascript', // Skip JS if not needed
-                '--disable-css', // Skip CSS if not needed
-                '--disable-plugins',
-                '--disable-background-timer-throttling',
-                '--disable-backgrounding-occluded-windows',
-                '--disable-renderer-backgrounding',
-                '--window-size=1920,1080',
-                '--log-level=3'
-            );
-        
-        const driver = await new Builder()
-            .forBrowser('chrome')
-            .setChromeOptions(options)
-            .build();
+        try {
+            const options = new chrome.Options()
+                .addArguments(
+                    '--headless',
+                    '--disable-gpu',
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-extensions',
+                    '--disable-images',
+                    '--disable-javascript',
+                    '--disable-css',
+                    '--disable-plugins',
+                    '--disable-background-timer-throttling',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-renderer-backgrounding',
+                    '--window-size=1920,1080',
+                    '--log-level=3'
+                );
             
-        await driver.manage().setTimeouts({
-            pageLoad: 15000,
-            script: 10000,
-            implicit: 5000
-        });
-        
-        driverPool.push(driver);
+            const driver = await new Builder()
+                .forBrowser('chrome')
+                .setChromeOptions(options)
+                .build();
+                
+            await driver.manage().setTimeouts({
+                pageLoad: 15000,
+                script: 10000,
+                implicit: 5000
+            });
+            
+            driverPool.push(driver);
+        } catch (error) {
+            console.error(`Failed to initialize driver ${i + 1}:`, error.message);
+        }
     }
+    
+    driverPoolInitialized = true;
+    console.log(`✅ Driver pool initialized with ${driverPool.length} drivers`);
 }
 
-// Get available driver from pool
 async function getDriver() {
-    if (driverPool.length === 0) {
+    if (!driverPoolInitialized) {
         await initializeDriverPool();
     }
     return driverPool.pop();
 }
 
-// Return driver to pool
 function returnDriver(driver) {
-    driverPool.push(driver);
+    if (driver && driverPool.length < MAX_DRIVERS) {
+        driverPool.push(driver);
+    } else if (driver) {
+        driver.quit().catch(err => console.error("Error quitting excess driver:", err));
+    }
 }
 
-// Cleanup driver pool
 async function cleanupDriverPool() {
     console.log('🧹 Cleaning up driver pool...');
     for (const driver of driverPool) {
@@ -98,142 +247,36 @@ async function cleanupDriverPool() {
         }
     }
     driverPool = [];
+    driverPoolInitialized = false;
 }
 
-// OPTION 1: Hybrid approach - try requests first, fallback to Selenium
-async function crawlWithHybridApproach(links) {
-    if (!links || links.length === 0) return [];
-    
-    const results = [];
-    const failedLinks = [];
-    
-    // First pass: Try with requests + cheerio (much faster)
-    console.log('📡 Phase 1: Trying fast extraction with requests...');
-    const requestPromises = links.map(async (linkInfo) => {
-        const { link, title } = linkInfo;
-        try {
-            const response = await axios.get(link, {
-                timeout: 8000,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5',
-                    'Accept-Encoding': 'gzip, deflate',
-                    'Connection': 'keep-alive',
-                }
-            });
-            
-            const dom = new JSDOM(response.data, { url: link });
-            const article = new Readability(dom.window.document).parse();
-            
-            if (article && article.textContent && article.textContent.trim().length > 200) {
-                const cleanText = article.textContent.trim().replace(/\s{2,}/g, ' ');
-                console.log(`✅ Fast extraction successful for: ${link}`);
-                return { status: 'success', title, link, textContent: cleanText.substring(0, 8000) };
-            } else {
-                failedLinks.push(linkInfo);
-                return { status: 'fail', link };
-            }
-        } catch (error) {
-            failedLinks.push(linkInfo);
-            return { status: 'fail', link };
-        }
-    });
-    
-    const requestResults = await Promise.all(requestPromises);
-    results.push(...requestResults.filter(r => r.status === 'success'));
-    
-    // Second pass: Use Selenium for failed links
-    if (failedLinks.length > 0 && results.length < 2) {
-        console.log(`🔄 Phase 2: Using Selenium for ${failedLinks.length} failed links...`);
-        const seleniumResults = await crawlWithSeleniumPool(failedLinks);
-        results.push(...seleniumResults);
-    }
-    
-    return results;
-}
-
-// OPTION 2: Optimized Selenium with driver pool
-async function crawlWithSeleniumPool(links) {
-    if (!links || links.length === 0) return [];
-    
-    const crawlSingleLink = async (linkInfo) => {
-        const { link, title } = linkInfo;
-        const driver = await getDriver();
-        
-        try {
-            console.log(`🔍 Selenium crawling: ${link}`);
-            await driver.get(link);
-            
-            // Wait for basic content to load
-            await driver.wait(until.elementLocated(By.tagName('body')), 10000);
-            
-            const pageSource = await driver.getPageSource();
-            const dom = new JSDOM(pageSource, { url: link });
-            const article = new Readability(dom.window.document).parse();
-            
-            if (article && article.textContent) {
-                const cleanText = article.textContent.trim().replace(/\s{2,}/g, ' ');
-                console.log(`✅ Selenium extraction successful for: ${link}`);
-                return { status: 'success', title, link, textContent: cleanText.substring(0, 8000) };
-            } else {
-                return { status: 'fail', link };
-            }
-        } catch (err) {
-            console.log(`❌ Selenium failed for ${link}: ${err.message.split('\n')[0]}`);
-            return { status: 'fail', link };
-        } finally {
-            returnDriver(driver);
-        }
-    };
-    
-    // Limit concurrent Selenium operations
-    const batchSize = Math.min(links.length, MAX_DRIVERS);
-    const results = [];
-    
-    for (let i = 0; i < links.length; i += batchSize) {
-        const batch = links.slice(i, i + batchSize);
-        const batchPromises = batch.map(linkInfo => crawlSingleLink(linkInfo));
-        const batchResults = await Promise.all(batchPromises);
-        results.push(...batchResults.filter(r => r.status === 'success'));
-    }
-    
-    return results;
-}
-
-// OPTION 3: Pure requests approach (fastest)
 async function crawlWithRequestsOnly(links) {
     if (!links || links.length === 0) return [];
     
-    console.log('⚡ Using pure requests approach for maximum speed...');
+    console.log('⚡ Using optimized requests approach...');
     
     const crawlSingleLink = async (linkInfo) => {
         const { link, title } = linkInfo;
         
         try {
             const response = await axios.get(link, {
-                timeout: 10000,
+                timeout: 12000,
                 maxRedirects: 3,
                 headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                     'Accept-Language': 'en-US,en;q=0.5',
                     'Connection': 'keep-alive',
                 }
             });
             
-            // Try multiple extraction methods
             const dom = new JSDOM(response.data, { url: link });
             let article = new Readability(dom.window.document).parse();
             
             if (!article || !article.textContent || article.textContent.trim().length < 200) {
-                // Fallback: manual content extraction
                 const $ = cheerio.load(response.data);
-                
-                // Remove unwanted elements
                 $('script, style, nav, header, footer, aside, .advertisement, .ads, .social-share').remove();
                 
-                // Try common content selectors
                 const contentSelectors = [
                     'article', '[role="main"]', '.content', '.post-content', 
                     '.entry-content', '.article-content', 'main', '.container p'
@@ -254,7 +297,7 @@ async function crawlWithRequestsOnly(links) {
             
             if (article && article.textContent && article.textContent.trim().length > 200) {
                 const cleanText = article.textContent.trim().replace(/\s{2,}/g, ' ');
-                console.log(`✅ Requests extraction successful for: ${link}`);
+                console.log(`✅ Content extracted from: ${link}`);
                 return { status: 'success', title, link, textContent: cleanText.substring(0, 8000) };
             } else {
                 console.log(`⚠️ Insufficient content for: ${link}`);
@@ -262,33 +305,33 @@ async function crawlWithRequestsOnly(links) {
             }
             
         } catch (error) {
-            console.log(`❌ Requests failed for ${link}: ${error.message}`);
+            console.log(`❌ Failed to crawl ${link}: ${error.message}`);
             return { status: 'fail', link };
         }
     };
     
     const crawlPromises = links.map(linkInfo => crawlSingleLink(linkInfo));
-    const results = await Promise.all(crawlPromises);
+    const results = await Promise.allSettled(crawlPromises);
     
-    return results.filter(r => r.status === 'success');
+    return results
+        .filter(result => result.status === 'fulfilled' && result.value.status === 'success')
+        .map(result => result.value);
 }
 
-// Enhanced DuckDuckGo search with better filtering
 async function enhancedDuckDuckGoSearch(query) {
     const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
     
     try {
         const headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
             'Connection': 'keep-alive',
         };
         
-        const { data } = await axios.get(searchUrl, { headers, timeout: 10000 });
+        const { data } = await axios.get(searchUrl, { headers, timeout: 12000 });
         const $ = cheerio.load(data);
         const results = [];
-        const { URL } = require('url');
         
         $('a.result__a').each((i, el) => {
             const title = $(el).text().trim();
@@ -303,30 +346,32 @@ async function enhancedDuckDuckGoSearch(query) {
                     results.push({ title, link: realUrl, snippet });
                 }
             } catch (e) {
-                // Ignore invalid links
+                // Ignore invalid URLs
             }
         });
         
         return results;
     } catch (error) {
-        console.error('❌ Enhanced DuckDuckGo scrape failed:', error.message);
+        console.error('❌ DuckDuckGo search failed:', error.message);
         return [];
     }
 }
 
-// Filter out low-quality domains
 function isLowQualityDomain(url) {
     const lowQualityDomains = [
         'pinterest.com', 'instagram.com', 'twitter.com', 'facebook.com',
-        'youtube.com', 'tiktok.com', 'reddit.com', 'quora.com'
+        'youtube.com', 'tiktok.com', 'reddit.com'
     ];
     
     return lowQualityDomains.some(domain => url.includes(domain));
 }
 
-// --- 3. HELPER & UTILITY FUNCTIONS ---
 function sanitizeQuery(query) {
-    const instructionalWords = ['explain about', 'explain', 'what is', 'what are', 'who is', 'who are', 'tell me about', 'give me information on', 'define', 'definition of'];
+    const instructionalWords = [
+        'explain about', 'explain', 'what is', 'what are', 'who is', 'who are', 
+        'tell me about', 'give me information on', 'define', 'definition of'
+    ];
+    
     let sanitized = query.toLowerCase().trim();
     for (const word of instructionalWords) { 
         if (sanitized.startsWith(word + ' ')) { 
@@ -337,7 +382,7 @@ function sanitizeQuery(query) {
     return sanitized.charAt(0).toUpperCase() + sanitized.slice(1);
 }
 
-// --- 4. OPTIMIZED API ROUTES ---
+// --- MAIN API ROUTE ---
 app.post('/api', async (req, res) => {
     const { query } = req.body;
     if (!query) { 
@@ -345,238 +390,235 @@ app.post('/api', async (req, res) => {
     }
 
     const startTime = Date.now();
-    console.log(`\n--- [OPTIMIZED PIPELINE START] ---`);
-    console.log(`[PIPELINE] Received query: "${query}"`);
+    console.log(`\n--- [ENHANCED PIPELINE START] ---`);
+    console.log(`[PIPELINE] Query: "${query}"`);
 
     try {
-        // // Check cache first <-- REMOVED
-        // const cachedResult = await findSimilarQuery(query);
-        // if (cachedResult) {
-        //     console.log(`[PIPELINE] ✅ Cache hit! Returning cached result.`);
-        //     return res.json({ ...cachedResult, fromCache: true });
-        // }
-
-        console.log(`[PIPELINE] Step 1: Searching DuckDuckGo...`); // Step number updated
+        // Step 1: Search
+        console.log(`[PIPELINE] Step 1: Searching...`);
         const searchQuery = sanitizeQuery(query);
-        
-        // Use enhanced search
         const searchResults = await enhancedDuckDuckGoSearch(searchQuery);
 
         if (!searchResults || searchResults.length === 0) {
-            console.log(`[PIPELINE] ⚠️ No sources found on DuckDuckGo for query: "${searchQuery}"`);
+            console.log(`[PIPELINE] ⚠️ No sources found for: "${searchQuery}"`);
             return res.json({ 
-                summary: "I couldn't find any relevant sources online to answer your question. Please try a different query.", 
+                summary: "I couldn't find any relevant sources online for your query. Please try rephrasing your question or using different keywords.", 
                 key_points: [], 
                 sources: [], 
+                follow_up_questions: [],
                 all_search_results: [] 
             });
         }
         
-        // Get unique links and select top results
+        // Step 2: Extract content
         const uniqueLinks = Array.from(new Map(searchResults.map(item => [item.link, item])).values());
-        const linksToAnalyze = uniqueLinks.slice(0, 5); // Increased to 5 for better content
-        console.log(`[PIPELINE] Found ${searchResults.length} results. Crawling top ${linksToAnalyze.length}...`);
+        const linksToAnalyze = uniqueLinks.slice(0, 6); // Analyze more sources
+        console.log(`[PIPELINE] Step 2: Extracting content from ${linksToAnalyze.length} sources...`);
         
-        // Initialize driver pool if needed (lazy initialization)
-        if (!driverPoolInitialized) {
-            await initializeDriverPool();
-            driverPoolInitialized = true;
-        }
-        
-        // Choose crawling strategy based on your needs:
-        
-        // OPTION 1: Fastest - Pure requests (recommended for speed)
         const extracted = await crawlWithRequestsOnly(linksToAnalyze);
-        
-        // OPTION 2: Balanced - Hybrid approach (uncomment to use)
-        // const extracted = await crawlWithHybridApproach(linksToAnalyze);
-        
-        // OPTION 3: Most reliable but slower - Selenium only
-        // const extracted = await crawlWithSeleniumPool(linksToAnalyze);
 
         if (extracted.length === 0) {
-            console.log(`[PIPELINE] ⚠️ No content could be extracted from any source.`);
+            console.log(`[PIPELINE] ⚠️ No content extracted from sources.`);
             return res.status(500).json({ 
-                error: "I found sources, but was unable to read their content. This can happen with complex websites or network issues." 
+                error: "I found sources but couldn't extract their content. This might be due to website restrictions or network issues. Please try again." 
             });
         }
 
-        console.log(`[PIPELINE] Step 2: Successfully extracted content from ${extracted.length} sources. Generating AI analysis...`); // Step number updated
+        // Step 3: AI Analysis
+        console.log(`[PIPELINE] Step 3: Generating AI analysis from ${extracted.length} sources...`);
         
-        // Create combined text for AI analysis
         const combinedText = extracted.map((c, i) => 
             `--- Source ${i + 1}: ${c.title} ---\n${c.textContent}\n\n`
         ).join('');
         
-        // Enhanced prompt with better instructions
-        const prompt = `You are an expert research analyst. Your task is to synthesize information to answer the user's query based ONLY on the provided web sources.
+        const prompt = `You are an expert research analyst. Analyze the provided web sources to comprehensively answer the user's query.
 
 USER'S QUERY: "${query}"
 
-Analyze the following sources and generate a response in a single, valid JSON object format. The JSON object MUST have this exact structure:
+Generate a response in valid JSON format with this exact structure:
 
 {
-    "summary": "A comprehensive summary that directly answers the user's query. Make it informative and well-structured.",
-    "key_points": ["An array of 4-6 crucial bullet points that highlight the most important information"],
+    "summary": "A comprehensive, well-structured summary that directly answers the user's query. Make it informative and easy to understand.",
+    "key_points": ["Array of 4-6 crucial bullet points highlighting the most important information"],
     "sources_used": [1, 2, 3],
-    "follow_up_questions": ["An array of 3 insightful follow-up questions related to the topic"]
+    "follow_up_questions": ["Array of 3 insightful follow-up questions related to the topic"]
 }
 
-IMPORTANT RULES:
-- You MUST include all keys in the JSON response
-- If you cannot generate content for a key, return an empty array [] for arrays or empty string "" for strings
-- Your entire response must be ONLY the JSON object - no additional text
+IMPORTANT REQUIREMENTS:
+- Your response must be ONLY the JSON object, no additional text
 - Base your answer ONLY on the provided sources
-- Make the summary comprehensive but concise
-- Ensure key_points are actionable and informative
-- sources_used should reference the source numbers (1-based indexing)
+- Make the summary comprehensive but concise (2-3 paragraphs)
+- Ensure key_points are specific and actionable
+- sources_used should reference source numbers (1-based indexing)
+- Include all required JSON keys
 
 --- SOURCES ---
 ${combinedText}
 --- END SOURCES ---`;
 
-        const model = genAI.getGenerativeModel({ 
-            model: "gemini-1.5-flash-latest", 
-            generationConfig: { 
-                response_mime_type: "application/json",
-                temperature: 0.3 // Lower temperature for more consistent JSON
-            } 
-        });
-        
-        const result = await model.generateContent(prompt);
-        const text = result.response.text();
+        const aiResponse = await makeGeminiRequest(prompt);
         
         let parsed;
         try {
-            parsed = JSON.parse(text);
+            parsed = JSON.parse(aiResponse);
         } catch (err) {
-            console.error("❌ AI returned invalid JSON. Raw response:", text.substring(0, 500) + "...");
+            console.error("❌ Invalid JSON from AI:", aiResponse.substring(0, 500));
             return res.status(500).json({ 
-                error: "The AI analyst returned an invalidly formatted response. This may be a temporary issue." 
+                error: "The AI service returned an invalid response. Please try again." 
             });
         }
         
-        // Map sources used to actual source objects
+        // Prepare final response
         const sourcesUsed = parsed.sources_used ? 
             parsed.sources_used.map(num => extracted[num - 1] || null).filter(Boolean) : [];
         
         const finalResponse = {
-            summary: parsed.summary || "The AI did not provide a summary.",
+            summary: parsed.summary || "Unable to generate summary.",
             key_points: parsed.key_points || [],
             sources: sourcesUsed.map(s => ({ title: s.title, link: s.link })),
             follow_up_questions: parsed.follow_up_questions || [],
-            all_search_results: uniqueLinks
+            all_search_results: uniqueLinks.slice(0, 10) // Limit results
         };
 
         const endTime = Date.now();
         const executionTime = (endTime - startTime) / 1000;
-        console.log(`[PIPELINE] ✅ Optimized pipeline finished in ${executionTime}s (${extracted.length} sources processed).`);
+        console.log(`[PIPELINE] ✅ Pipeline completed in ${executionTime}s (${extracted.length} sources)`);
         
         res.json(finalResponse);
 
-        // Background operations (don't await these)
+        // Background history save
         setImmediate(async () => {
             try {
                 const newHistory = new History({ query });
                 await newHistory.save();
-                // await cacheQueryResult(query, finalResponse); // <-- REMOVED
             } catch (dbError) {
-                console.error("Error during background DB ops:", dbError);
+                console.error("Background DB save failed:", dbError);
             }
         });
 
     } catch (err) {
-        console.error("❌ [PIPELINE] A critical error occurred:", err);
+        console.error("❌ [PIPELINE] Critical error:", err);
+        
+        if (err.message.includes('Rate limit')) {
+            return res.status(429).json({ 
+                error: err.message,
+                retryAfter: 60
+            });
+        }
+        
+        if (err.message.includes('Service temporarily unavailable')) {
+            return res.status(503).json({ 
+                error: "AI service is temporarily overloaded. Please try again in a few moments." 
+            });
+        }
+        
         if (!res.headersSent) {
             res.status(500).json({ 
-                error: "An unexpected internal error occurred." 
+                error: "An unexpected error occurred. Please try again." 
             });
         }
     }
 });
 
-// Test route to verify optimization
-app.get('/api/test', async (req, res) => {
-    try {
-        const testResults = await enhancedDuckDuckGoSearch('JavaScript tutorials');
-        res.json({ 
-            message: 'Optimization working!', 
-            results: testResults.length,
-            sample: testResults[0] || null
-        });
-    } catch (error) {
-        res.json({ error: error.message });
-    }
-});
-
-// --- 5. ALL OTHER ROUTES (UNCHANGED) ---
+// --- FILE ANALYSIS ROUTE ---
 app.post('/api/analyze-file', upload.single('file'), async (req, res) => {
-    console.log('\n[FILE ANALYSIS] Request received.');
+    console.log('\n[FILE ANALYSIS] Request received');
+    
     if (!req.file) {
-        console.log('[FILE ANALYSIS] ❌ Error: No file was uploaded.');
-        return res.status(400).json({ error: "No file was uploaded." });
+        return res.status(400).json({ error: "No file uploaded." });
     }
 
     try {
         const file = req.file;
-        console.log(`[FILE ANALYSIS] Received: ${file.originalname} (${file.mimetype})`);
+        console.log(`[FILE ANALYSIS] Processing: ${file.originalname} (${file.mimetype})`);
 
         let extractedText = '';
 
+        // Handle different file types
         if (file.mimetype === 'text/plain' || file.originalname.toLowerCase().endsWith('.txt')) {
             extractedText = file.buffer.toString('utf-8');
-        }
+        } 
         else if (file.mimetype === 'application/pdf' || file.originalname.toLowerCase().endsWith('.pdf')) {
-            console.log('[FILE ANALYSIS] 📄 Attempting text extraction using pdf-parse...');
+            console.log('[FILE ANALYSIS] 📄 Extracting text from PDF...');
             const data = await pdfParse(file.buffer);
             extractedText = data.text;
-
-            if (!extractedText || extractedText.trim().length < 10) {
-                console.log('[FILE ANALYSIS] ⚠️ Text-based extraction failed. Using OCR...');
-                const tempPath = path.join(os.tmpdir(), `${Date.now()}-${file.originalname}`);
-                fs.writeFileSync(tempPath, file.buffer);
-                const converter = fromPath(tempPath, { density: 150, saveFilename: 'ocr_temp', savePath: os.tmpdir(), format: 'png', width: 1200 });
-                const imageResult = await converter(1);
-                const ocrResult = await Tesseract.recognize(imageResult.path, 'eng');
-                extractedText = ocrResult.data.text;
-                fs.unlinkSync(tempPath);
-                fs.unlinkSync(imageResult.path);
-            }
-        }
+        } 
         else {
-            return res.status(400).json({ error: "Unsupported file type. Please upload a .txt or .pdf file." });
+            return res.status(400).json({ 
+                error: "Unsupported file type. Please upload a .txt or .pdf file." 
+            });
         }
 
         if (!extractedText || !extractedText.trim()) {
-            return res.status(400).json({ error: "Could not extract any text from the file. It might be empty or image-based and failed OCR." });
+            return res.status(400).json({ 
+                error: "Could not extract text from the file. It might be empty or an image-based PDF." 
+            });
         }
 
-        console.log(`[FILE ANALYSIS] ✅ Extracted ${extractedText.length} characters.`);
+        console.log(`[FILE ANALYSIS] ✅ Extracted ${extractedText.length} characters`);
 
-        const prompt = `Analyze the following document and provide key points:\n\n${extractedText}`;
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest", generationConfig: { response_mime_type: "application/json" } });
-        const result = await model.generateContent(prompt);
-        const responseText = result.response.text();
-        const analysisData = JSON.parse(responseText);
+        const prompt = `You are an expert document analyst. Analyze the following document and provide insights.
+
+Generate a response in valid JSON format:
+
+{
+  "summary": "A comprehensive summary of the document's main content and purpose",
+  "key_points": ["Array of 4-6 key takeaways from the document"],
+  "document_type": "Type of document (e.g., research paper, report, article, etc.)",
+  "main_topics": ["Array of main topics covered"]
+}
+
+Your response must be ONLY the JSON object.
+
+--- DOCUMENT TEXT ---
+${extractedText.substring(0, 20000)}
+--- END DOCUMENT TEXT ---`;
+        
+        const responseText = await makeGeminiRequest(prompt, true);
+        
+        let analysisData;
+        try {
+            analysisData = JSON.parse(responseText);
+        } catch (err) {
+            console.error("❌ Invalid JSON from file analysis:", responseText.substring(0, 500));
+            return res.status(500).json({ 
+                error: "Failed to analyze the file. Please try again." 
+            });
+        }
 
         res.json({
-            ...analysisData,
-            sources: [],
-            all_search_results: [],
-            follow_up_questions: []
+            summary: analysisData.summary || "No summary generated.",
+            key_points: analysisData.key_points || [],
+            document_type: analysisData.document_type || "Unknown",
+            main_topics: analysisData.main_topics || [],
+            sources: [{ title: file.originalname, link: '#' }],
+            follow_up_questions: [],
+            all_search_results: []
         });
 
     } catch (error) {
-        console.error("❌ Error during file analysis:", error);
-        res.status(500).json({ error: error.message || "An internal server error occurred during file analysis." });
+        console.error("❌ File analysis error:", error);
+        
+        if (error.message.includes('Rate limit')) {
+            return res.status(429).json({ 
+                error: error.message,
+                retryAfter: 60
+            });
+        }
+        
+        res.status(500).json({ 
+            error: "An error occurred during file analysis. Please try again." 
+        });
     }
 });
 
+// --- HISTORY ROUTES ---
 app.get('/api/history', async (req, res) => {
     try {
-        const history = await History.find({}).sort({ createdAt: -1 });
-        res.status(200).json(history);
+        const history = await History.find({}).sort({ createdAt: -1 }).limit(50);
+        res.json(history);
     } catch (error) {
+        console.error('History fetch error:', error);
         res.status(500).json({ error: 'Failed to fetch history' });
     }
 });
@@ -585,10 +627,12 @@ app.post('/api/history', async (req, res) => {
     try {
         const { query } = req.body;
         if (!query) return res.status(400).json({ error: 'Query is required' });
+        
         const newHistory = new History({ query });
         await newHistory.save();
         res.status(201).json(newHistory);
     } catch (error) {
+        console.error('History save error:', error);
         res.status(500).json({ error: 'Failed to save history' });
     }
 });
@@ -597,8 +641,9 @@ app.delete('/api/history/:id', async (req, res) => {
     try {
         const { id } = req.params;
         await History.findByIdAndDelete(id);
-        res.status(200).json({ message: 'History item deleted' });
+        res.json({ message: 'History item deleted' });
     } catch (error) {
+        console.error('History delete error:', error);
         res.status(500).json({ error: 'Failed to delete history item' });
     }
 });
@@ -607,89 +652,148 @@ app.put('/api/history/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const { query } = req.body;
-        if (!query) return res.status(400).json({ error: 'New query text is required' });
+        if (!query) return res.status(400).json({ error: 'Query text is required' });
+        
         await History.findByIdAndUpdate(id, { query });
-        res.status(200).json({ message: 'History item updated' });
+        res.json({ message: 'History item updated' });
     } catch (error) {
+        console.error('History update error:', error);
         res.status(500).json({ error: 'Failed to update history item' });
     }
 });
 
+// --- ACADEMIC SEARCH ROUTES ---
 const coreApiKey = process.env.CORE_API_KEY;
-if (!coreApiKey) {
-  console.error('Error: CORE_API_KEY is not defined in the .env file. Please add it and restart the server.');
-  process.exit(1);
-}
 
 async function searchOpenAlex(query) {
-  const userEmail = 'r87921749@gmail.com';
-  const url = `https://api.openalex.org/works?search=${encodeURIComponent(query)}&mailto=${userEmail}`;
-  try {
-    const response = await axios.get(url);
-    return response.data;
-  } catch (error) {
-    console.error('Error fetching from OpenAlex:', error.message);
-    throw new Error('Failed to fetch data from OpenAlex.');
-  }
+    const userEmail = process.env.CONTACT_EMAIL || 'contact@example.com';
+    const url = `https://api.openalex.org/works?search=${encodeURIComponent(query)}&mailto=${userEmail}`;
+    
+    try {
+        const response = await axios.get(url, { timeout: 15000 });
+        return response.data;
+    } catch (error) {
+        console.error('OpenAlex search error:', error.message);
+        throw new Error('Failed to search OpenAlex');
+    }
 }
 
 async function searchCore(query) {
-  const url = `https://api.core.ac.uk/v3/search/works`;
-  try {
-    const response = await axios.post(url, { q: query }, {
-      headers: { 'Authorization': `Bearer ${coreApiKey}` }
-    });
-    return response.data;
-  } catch (error) {
-    console.error('Error fetching from CORE:', error.response ? error.response.data : error.message);
-    throw new Error('Failed to fetch data from CORE.');
-  }
+    if (!coreApiKey) {
+        throw new Error('CORE API key not configured');
+    }
+    
+    const url = `https://api.core.ac.uk/v3/search/works`;
+    try {
+        const response = await axios.post(url, { q: query }, {
+            headers: { 'Authorization': `Bearer ${coreApiKey}` },
+            timeout: 15000
+        });
+        return response.data;
+    } catch (error) {
+        console.error('CORE search error:', error.response?.data || error.message);
+        throw new Error('Failed to search CORE');
+    }
 }
 
 app.get('/', (req, res) => {
-  console.log("Root route was hit!");
-  res.send('Welcome to the Scholarly Search API!');
+    res.json({ 
+        message: 'NIT Chatbot API is running successfully!',
+        version: '2.0.0',
+        endpoints: ['/api', '/api/analyze-file', '/api/history', '/search']
+    });
 });
 
 app.get('/search', async (req, res) => {
-  console.log("Search route was hit!");
-  const { query } = req.query;
-  if (!query) {
-    return res.status(400).json({ error: 'A search query is required.' });
-  }
-  try {
-    const [openAlexResults, coreResults] = await Promise.all([
-      searchOpenAlex(query),
-      searchCore(query)
-    ]);
-    res.json({
-      message: 'Search successful',
-      data: {
-        openAlex: openAlexResults.results.map(work => ({ title: work.title, doi: work.doi })),
-        core: coreResults.results.map(work => ({ title: work.title, year: work.yearPublished }))
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ error: 'An error occurred while searching.' });
-  }
+    const { query } = req.query;
+    if (!query) {
+        return res.status(400).json({ error: 'Search query is required' });
+    }
+    
+    try {
+        const results = await Promise.allSettled([
+            searchOpenAlex(query),
+            coreApiKey ? searchCore(query) : Promise.resolve({ results: [] })
+        ]);
+        
+        const openAlexResults = results[0].status === 'fulfilled' ? results[0].value : { results: [] };
+        const coreResults = results[1].status === 'fulfilled' ? results[1].value : { results: [] };
+        
+        res.json({
+            message: 'Academic search completed',
+            data: {
+                openAlex: openAlexResults.results?.slice(0, 10).map(work => ({ 
+                    title: work.title, 
+                    doi: work.doi,
+                    year: work.publication_year 
+                })) || [],
+                core: coreResults.results?.slice(0, 10).map(work => ({ 
+                    title: work.title, 
+                    year: work.yearPublished 
+                })) || []
+            }
+        });
+    } catch (error) {
+        console.error('Academic search error:', error);
+        res.status(500).json({ error: 'Academic search failed' });
+    }
 });
 
-// --- 6. DATABASE & SERVER INITIALIZATION ---
-mongoose.connect(process.env.MONGO_URI)
-    .then(() => console.log('✅ MongoDB connected'))
-    .catch(err => console.error('❌ MongoDB connection error:', err));
+// --- HEALTH CHECK ENDPOINT ---
+app.get('/health', async (req, res) => {
+    try {
+        const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+        
+        res.json({
+            status: 'healthy',
+            timestamp: new Date().toISOString(),
+            database: dbStatus,
+            driverPool: driverPool.length,
+            uptime: process.uptime()
+        });
+    } catch (error) {
+        res.status(500).json({
+            status: 'unhealthy',
+            error: error.message
+        });
+    }
+});
 
-// Add graceful shutdown handling
+// --- DATABASE CONNECTION ---
+mongoose.connect(process.env.MONGO_URI)
+    .then(() => console.log('✅ MongoDB connected successfully'))
+    .catch(err => {
+        console.error('❌ MongoDB connection failed:', err);
+        process.exit(1);
+    });
+
+// --- GRACEFUL SHUTDOWN ---
 process.on('SIGINT', async () => {
-    console.log('\n🛑 Received SIGINT. Gracefully shutting down...');
+    console.log('\n🛑 Shutting down gracefully...');
     await cleanupDriverPool();
-    process.exit(0);
+    mongoose.connection.close(() => {
+        console.log('MongoDB connection closed');
+        process.exit(0);
+    });
 });
 
 process.on('SIGTERM', async () => {
-    console.log('\n🛑 Received SIGTERM. Gracefully shutting down...');
+    console.log('\n🛑 Received SIGTERM...');
     await cleanupDriverPool();
-    process.exit(0);
+    mongoose.connection.close(() => {
+        console.log('MongoDB connection closed');
+        process.exit(0);
+    });
 });
-    
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+    console.error('Unhandled error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+});
+
+app.listen(PORT, () => {
+    console.log(`🚀 NIT Chatbot Server running on port ${PORT}`);
+    console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+});
